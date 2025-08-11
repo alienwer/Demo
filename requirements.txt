@@ -1,0 +1,15 @@
+pyqt5>=5.15.11
+pyserial>=3.5
+qtawesome>=1.1.1
+pyopengl>=3.1.6
+pyassimp >= 5.2.5
+trimesh >= 4.6.1
+mypy>=1.0.0
+pytest>=7.0.0
+pytest-qt>=4.0.0
+sphinx>=5.0.0
+pyglet>=1.5.31
+numpy>=1.21.0
+spdlog>=1.8.0
+flexivrdk>=1.6.0
+pyqtgraph>=0.13.7
