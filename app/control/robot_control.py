@@ -178,10 +178,10 @@ class RobotControl(QObject, threading.Thread):
                     joint_torques = list(robot_states.tau)
                     self.joint_torque_updated.emit(joint_torques)
                     
-                    # 末端执行器位置 (TCP位置)
+                    # 末端执行器位置和姿态 (TCP完整姿态)
                     tcp_pose = list(robot_states.tcp_pose)
-                    end_effector_pos = tcp_pose[0:3]  # 取位置部分 [x, y, z]
-                    self.end_effector_updated.emit(end_effector_pos)
+                    # TCP姿态格式: [x, y, z, qw, qx, qy, qz] (位置 + 四元数)
+                    self.end_effector_updated.emit(tcp_pose)  # 发送完整的TCP姿态数据
                     
                     # 力/力矩传感器数据 (TCP坐标系下的外部力)
                     if hasattr(robot_states, 'ext_wrench_in_tcp'):
@@ -674,6 +674,34 @@ class RobotControl(QObject, threading.Thread):
                 self.error_signal.emit(f"仿真模式获取全局变量失败: {str(e)}")
         else:
             self.error_signal.emit("机器人未连接，无法获取全局变量")
+    
+    def set_global_variables(self, variables: dict):
+        """设置机器人全局变量"""
+        if self.hardware and self.robot is not None:
+            try:
+                # 根据API文档，SetGlobalVariables接受格式为 {global_var_name: global_var_value(s)}
+                # 布尔值用int 1和0表示
+                self.robot.SetGlobalVariables(variables)
+                self.status_updated.emit(f"已设置 {len(variables)} 个全局变量")
+                
+                # 设置完成后重新获取全局变量以确认更新
+                self.get_global_variables()
+                
+            except Exception as e:
+                self.error_signal.emit(f"设置全局变量失败: {str(e)}")
+        elif not self.hardware:
+            # 仿真模式下模拟设置全局变量
+            try:
+                # 在仿真模式下，我们可以更新示例数据来模拟设置过程
+                self.status_updated.emit(f"仿真模式：已设置 {len(variables)} 个全局变量")
+                
+                # 模拟设置后重新获取全局变量
+                self.get_global_variables()
+                
+            except Exception as e:
+                self.error_signal.emit(f"仿真模式设置全局变量失败: {str(e)}")
+        else:
+            self.error_signal.emit("机器人未连接，无法设置全局变量")
 
     def sync_urdf(self, template_urdf_path: str = None) -> bool:
         """

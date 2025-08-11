@@ -1,17 +1,19 @@
 '''
 Author: LK
 Date: 2025-02-07 22:07:28
-LastEditTime: 2025-08-11 07:15:27
+LastEditTime: 2025-08-11 08:40:23
 LastEditors: LK
 FilePath: /Demo/app/main.py
 '''
 import sys
 import os
 import numpy as np
+import math
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QLabel, QComboBox, QSpinBox, QDoubleSpinBox,
                              QGroupBox, QLineEdit, QTextEdit, QSlider, QFileDialog, QDesktopWidget,
-                             QSpacerItem, QSizePolicy, QTabWidget, QScrollArea, QSplitter)
+                             QSpacerItem, QSizePolicy, QTabWidget, QScrollArea, QSplitter,
+                             QTableWidget, QTableWidgetItem, QHeaderView)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QBrush, QFont
 import qtawesome as qta
@@ -51,6 +53,42 @@ try:
     ROS_AVAILABLE = True
 except ImportError:
     ROS_AVAILABLE = False
+
+def quaternion_to_euler(qw, qx, qy, qz):
+    """
+    将四元数转换为欧拉角（ZYX顺序，即Yaw-Pitch-Roll）
+    
+    Args:
+        qw, qx, qy, qz: 四元数分量
+    
+    Returns:
+        tuple: (roll, pitch, yaw) 欧拉角，单位为弧度
+    """
+    # 归一化四元数
+    norm = math.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+    if norm == 0:
+        return (0, 0, 0)
+    qw, qx, qy, qz = qw/norm, qx/norm, qy/norm, qz/norm
+    
+    # 转换为欧拉角
+    # Roll (x-axis rotation)
+    sinr_cosp = 2 * (qw * qx + qy * qz)
+    cosr_cosp = 1 - 2 * (qx * qx + qy * qy)
+    roll = math.atan2(sinr_cosp, cosr_cosp)
+    
+    # Pitch (y-axis rotation)
+    sinp = 2 * (qw * qy - qz * qx)
+    if abs(sinp) >= 1:
+        pitch = math.copysign(math.pi / 2, sinp)  # use 90 degrees if out of range
+    else:
+        pitch = math.asin(sinp)
+    
+    # Yaw (z-axis rotation)
+    siny_cosp = 2 * (qw * qz + qx * qy)
+    cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
+    yaw = math.atan2(siny_cosp, cosy_cosp)
+    
+    return (roll, pitch, yaw)
 
 class RobotArmControlApp(QMainWindow):
     """
@@ -320,11 +358,48 @@ class RobotArmControlApp(QMainWindow):
         comm_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         comm_scroll.setWidget(comm_page)
         self.left_tab.addTab(comm_scroll, '通信')
+        
+        # 全局变量页
+        global_vars_scroll = QScrollArea()
+        global_vars_scroll.setWidgetResizable(True)
+        global_vars_page = QWidget()
+        global_vars_layout = QVBoxLayout(global_vars_page)
+        global_vars_layout.setSpacing(8)
+        
+        # 导入全局变量管理组件
+        from app.ui.global_vars_widget import GlobalVariablesWidget
+        self.global_vars_widget = GlobalVariablesWidget()
+        
+        # 连接信号
+        self.global_vars_widget.variables_updated.connect(self.on_global_vars_apply)
+        
+        global_vars_layout.addWidget(self.global_vars_widget)
+        global_vars_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
+        global_vars_scroll.setWidget(global_vars_page)
+        self.left_tab.addTab(global_vars_scroll, '全局变量')
         # Splitter布局 - 优化分屏功能
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.left_tab)
+        
+        # 创建右侧区域：3D视图 + 数据显示面板
+        self.right_widget = QWidget()
+        right_layout = QVBoxLayout(self.right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(0)
+        
+        # 3D渲染器
         self.gl_renderer = GLRenderer()
-        self.splitter.addWidget(self.gl_renderer)
+        
+        # 数据显示面板
+        self.data_panel = self.create_data_display_panel()
+        self.data_panel.setMaximumHeight(200)
+        self.data_panel.setMinimumHeight(180)
+        
+        # 添加到右侧布局
+        right_layout.addWidget(self.gl_renderer, 1)  # 3D视图占主要空间
+        right_layout.addWidget(self.data_panel, 0)   # 数据面板固定高度
+        
+        self.splitter.addWidget(self.right_widget)
         
         # 优化分屏比例，提供更平衡的布局
         self.splitter.setStretchFactor(0, 2)  # 左侧面板权重
@@ -367,24 +442,152 @@ class RobotArmControlApp(QMainWindow):
         # 记录全屏状态
         self._monitor_fullscreen = False
         self._splitter_sizes = None
+    
+    def create_data_display_panel(self):
+        """创建数据显示面板 - 显示关节、TCP位姿和力/力矩数据"""
+        panel = QGroupBox('机器人实时数据')
+        panel.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #4a90e2;
+                border-radius: 8px;
+                margin-top: 8px;
+                padding-top: 8px;
+                background-color: #f8f9fa;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 15px;
+                padding: 0 8px 0 8px;
+                color: #2c3e50;
+                font-size: 13px;
+            }
+        """)
+        
+        main_layout = QHBoxLayout(panel)
+        main_layout.setSpacing(8)
+        
+        # 关节数据表格
+        joints_group = QGroupBox('关节数据 (A1-A7)')
+        joints_layout = QVBoxLayout(joints_group)
+        
+        self.joints_table = QTableWidget(7, 3)
+        self.joints_table.setHorizontalHeaderLabels(['关节', '位置 (deg)', '扭矩 (Nm)'])
+        self.joints_table.setVerticalHeaderLabels([f'A{i+1}' for i in range(7)])
+        self.joints_table.setMaximumHeight(160)
+        self.joints_table.horizontalHeader().setStretchLastSection(True)
+        self.joints_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.joints_table.setAlternatingRowColors(True)
+        
+        # 初始化关节表格数据
+        for i in range(7):
+            self.joints_table.setItem(i, 0, QTableWidgetItem(f'A{i+1}'))
+            self.joints_table.setItem(i, 1, QTableWidgetItem('-'))
+            self.joints_table.setItem(i, 2, QTableWidgetItem('-'))
+            for j in range(3):
+                item = self.joints_table.item(i, j)
+                if item:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        
+        joints_layout.addWidget(self.joints_table)
+        
+        # TCP位姿数据
+        tcp_group = QGroupBox('TCP位姿')
+        tcp_layout = QVBoxLayout(tcp_group)
+        
+        # TCP位置和姿态表格（合并为一个表格）
+        self.tcp_table = QTableWidget(6, 2)
+        self.tcp_table.setHorizontalHeaderLabels(['参数', '数值'])
+        self.tcp_table.setVerticalHeaderLabels(['X (m)', 'Y (m)', 'Z (m)', 'Rx (deg)', 'Ry (deg)', 'Rz (deg)'])
+        self.tcp_table.setMaximumHeight(160)
+        self.tcp_table.horizontalHeader().setStretchLastSection(True)
+        self.tcp_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tcp_table.setAlternatingRowColors(True)
+        
+        # 初始化TCP表格数据
+        tcp_labels = ['X (m)', 'Y (m)', 'Z (m)', 'Rx (deg)', 'Ry (deg)', 'Rz (deg)']
+        for i, label in enumerate(tcp_labels):
+            self.tcp_table.setItem(i, 0, QTableWidgetItem(label))
+            self.tcp_table.setItem(i, 1, QTableWidgetItem('-'))
+            for j in range(2):
+                item = self.tcp_table.item(i, j)
+                if item:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        
+        tcp_layout.addWidget(self.tcp_table)
+        
+        # TCP力/力矩数据
+        ft_group = QGroupBox('TCP力/力矩')
+        ft_layout = QVBoxLayout(ft_group)
+        
+        self.ft_table = QTableWidget(6, 2)
+        self.ft_table.setHorizontalHeaderLabels(['参数', '数值'])
+        self.ft_table.setVerticalHeaderLabels(['Fx (N)', 'Fy (N)', 'Fz (N)', 'Mx (Nm)', 'My (Nm)', 'Mz (Nm)'])
+        self.ft_table.setMaximumHeight(160)
+        self.ft_table.horizontalHeader().setStretchLastSection(True)
+        self.ft_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.ft_table.setAlternatingRowColors(True)
+        
+        # 初始化力/力矩表格数据
+        ft_labels = ['Fx (N)', 'Fy (N)', 'Fz (N)', 'Mx (Nm)', 'My (Nm)', 'Mz (Nm)']
+        for i, label in enumerate(ft_labels):
+            self.ft_table.setItem(i, 0, QTableWidgetItem(label))
+            self.ft_table.setItem(i, 1, QTableWidgetItem('-'))
+            for j in range(2):
+                item = self.ft_table.item(i, j)
+                if item:
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+        
+        ft_layout.addWidget(self.ft_table)
+        
+        # 设置表格样式
+        table_style = """
+            QTableWidget {
+                gridline-color: #d0d0d0;
+                background-color: white;
+                font-size: 9px;
+                border: 1px solid #cccccc;
+                border-radius: 4px;
+            }
+            QTableWidget::item {
+                padding: 2px;
+                text-align: center;
+            }
+            QHeaderView::section {
+                background-color: #e8f4fd;
+                padding: 3px;
+                border: 1px solid #d0d0d0;
+                font-weight: bold;
+                font-size: 9px;
+            }
+        """
+        
+        for table in [self.joints_table, self.tcp_table, self.ft_table]:
+            table.setStyleSheet(table_style)
+        
+        # 添加到主布局
+        main_layout.addWidget(joints_group)
+        main_layout.addWidget(tcp_group)
+        main_layout.addWidget(ft_group)
+        
+        return panel
 
     def toggle_monitor_fullscreen(self):
         """改进的全屏切换功能"""
         if not self._monitor_fullscreen:
             # 保存当前布局状态
             self._splitter_sizes = self.splitter.sizes()
-            self._text_widget_visible = self.text_widget.isVisible()
             
-            # 隐藏3D视图和文本信息，最大化图表显示
+            # 隐藏3D视图，最大化图表显示
             self.splitter.widget(1).hide()
-            self.text_widget.hide()
             
             # 调整图表布局以更好利用空间
-            for plot in self.all_plots:
-                plot.getViewBox().autoRange()
-                # 增大图表字体
-                plot.getAxis('left').setStyle(tickFont=QFont('Arial', 10))
-                plot.getAxis('bottom').setStyle(tickFont=QFont('Arial', 10))
+            if hasattr(self, 'all_plots'):
+                for plot in self.all_plots:
+                    plot.getViewBox().autoRange()
+                    # 增大图表字体
+                    plot.getAxis('left').setStyle(tickFont=QFont('Arial', 10))
+                    plot.getAxis('bottom').setStyle(tickFont=QFont('Arial', 10))
             
             self.monitor_full_btn.setText('还原')
             self._monitor_fullscreen = True
@@ -394,13 +597,12 @@ class RobotArmControlApp(QMainWindow):
             self.splitter.widget(1).show()
             if self._splitter_sizes:
                 self.splitter.setSizes(self._splitter_sizes)
-            if hasattr(self, '_text_widget_visible') and self._text_widget_visible:
-                self.text_widget.show()
             
             # 恢复图表字体大小
-            for plot in self.all_plots:
-                plot.getAxis('left').setStyle(tickFont=QFont('Arial', 8))
-                plot.getAxis('bottom').setStyle(tickFont=QFont('Arial', 8))
+            if hasattr(self, 'all_plots'):
+                for plot in self.all_plots:
+                    plot.getAxis('left').setStyle(tickFont=QFont('Arial', 8))
+                    plot.getAxis('bottom').setStyle(tickFont=QFont('Arial', 8))
             
             self.monitor_full_btn.setText('全屏')
             self._monitor_fullscreen = False
@@ -1029,110 +1231,61 @@ class RobotArmControlApp(QMainWindow):
         return robot_ops_group
 
     def create_monitor_group(self):
-        self.monitor_group = QGroupBox('监控信息')
-        main_layout = QHBoxLayout(self.monitor_group)
-        # 左栏文本 - 优化布局和显示
-        text_layout = QVBoxLayout()
-        text_layout.setSpacing(4)  # 减少间距
+        """创建监控组 - 专门显示图表和状态信息"""
+        self.monitor_group = QGroupBox('监控图表')
+        main_layout = QVBoxLayout(self.monitor_group)
+        main_layout.setSpacing(8)
         
-        # 创建分组显示
-        # 基本状态组
-        basic_group = QGroupBox('基本状态')
-        basic_layout = QVBoxLayout(basic_group)
-        basic_layout.setSpacing(2)
+        # 状态信息组（保留基本状态显示）
+        status_group = QGroupBox('系统状态')
+        status_layout = QHBoxLayout(status_group)
+        status_layout.setSpacing(8)
         
-        self.monitor_joint_label = QLabel('关节角度: -')
-        self.monitor_ee_label = QLabel('末端位置: -')
         self.monitor_status_label = QLabel('机器人状态: -')
         self.monitor_mode_label = QLabel('运行模式: -')
-        
-        # 设置字体样式
-        label_style = "font-size: 11px; padding: 2px;"
-        for label in [self.monitor_joint_label, self.monitor_ee_label, 
-                     self.monitor_status_label, self.monitor_mode_label]:
-            label.setStyleSheet(label_style)
-            label.setWordWrap(True)
-        
-        basic_layout.addWidget(self.monitor_joint_label)
-        basic_layout.addWidget(self.monitor_ee_label)
-        basic_layout.addWidget(self.monitor_status_label)
-        basic_layout.addWidget(self.monitor_mode_label)
-        
-        # 动态参数组
-        dynamic_group = QGroupBox('动态参数')
-        dynamic_layout = QVBoxLayout(dynamic_group)
-        dynamic_layout.setSpacing(2)
-        
-        self.monitor_velocity_label = QLabel('关节速度: -')
-        self.monitor_acceleration_label = QLabel('关节加速度: -')
-        self.monitor_torque_label = QLabel('平均力矩: -')
-        self.monitor_temperature_label = QLabel('平均温度: -')
-        self.monitor_power_label = QLabel('功率消耗: -')
-        
-        for label in [self.monitor_velocity_label, self.monitor_acceleration_label,
-                     self.monitor_torque_label, self.monitor_temperature_label, 
-                     self.monitor_power_label]:
-            label.setStyleSheet(label_style)
-            label.setWordWrap(True)
-        
-        dynamic_layout.addWidget(self.monitor_velocity_label)
-        dynamic_layout.addWidget(self.monitor_acceleration_label)
-        dynamic_layout.addWidget(self.monitor_torque_label)
-        dynamic_layout.addWidget(self.monitor_temperature_label)
-        dynamic_layout.addWidget(self.monitor_power_label)
-        
-        # 安全状态组
-        safety_group = QGroupBox('安全状态')
-        safety_layout = QVBoxLayout(safety_group)
-        safety_layout.setSpacing(2)
-        
         self.monitor_safety_label = QLabel('安全状态: -')
         self.monitor_fault_label = QLabel('故障信息: -')
         
-        for label in [self.monitor_safety_label, self.monitor_fault_label]:
+        label_style = "font-size: 10px; padding: 4px; background-color: #f8f8f8; border: 1px solid #e0e0e0; border-radius: 3px;"
+        for label in [self.monitor_status_label, self.monitor_mode_label, 
+                     self.monitor_safety_label, self.monitor_fault_label]:
             label.setStyleSheet(label_style)
             label.setWordWrap(True)
+            label.setMaximumHeight(30)
         
-        safety_layout.addWidget(self.monitor_safety_label)
-        safety_layout.addWidget(self.monitor_fault_label)
+        status_layout.addWidget(self.monitor_status_label)
+        status_layout.addWidget(self.monitor_mode_label)
+        status_layout.addWidget(self.monitor_safety_label)
+        status_layout.addWidget(self.monitor_fault_label)
         
-        # 添加分组到主布局
-        text_layout.addWidget(basic_group)
-        text_layout.addWidget(dynamic_group)
-        text_layout.addWidget(safety_group)
-        text_layout.addStretch()
+        main_layout.addWidget(status_group)
         
-        # 创建文本容器并设置样式
-        self.text_widget = QWidget()
-        self.text_widget.setLayout(text_layout)
-        self.text_widget.setStyleSheet("""
-            QGroupBox {
-                font-weight: bold;
-                border: 1px solid #cccccc;
-                border-radius: 5px;
-                margin-top: 5px;
-                padding-top: 5px;
-                background-color: #f9f9f9;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-                color: #333333;
-            }
-        """)
-        # 重新规划文本区域宽度，为图表提供更大空间
-        self.text_widget.setMaximumWidth(320)  # 减少最大宽度
-        self.text_widget.setMinimumWidth(250)  # 减少最小宽度
-        self.text_widget.setFixedWidth(300)  # 固定宽度，避免动态变化影响图表
-        self.text_widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        main_layout.addWidget(self.text_widget, 0)  # 文本区域不参与比例分配
-        # 右栏图表 - 增强交互功能
-        self.joint_plot = pg.PlotWidget(title="关节角度历史")
-        self.ee_plot = pg.PlotWidget(title="末端轨迹 (X-Y)")
-        self.ft_plot = pg.PlotWidget(title="力/力矩")
-        self.vel_plot = pg.PlotWidget(title="关节速度")
-        self.pos_plot = pg.PlotWidget(title="关节位置")
+        # 移除文本区域，改为图表显示
+        # 右栏图表 - 增强交互功能和标识
+        self.joint_plot = pg.PlotWidget(title="关节角度历史 (Joint Angles)")
+        self.joint_plot.setLabel('left', '角度 (度)', units='°')
+        self.joint_plot.setLabel('bottom', '时间 (秒)', units='s')
+        self.joint_plot.addLegend()
+        
+        self.ee_plot = pg.PlotWidget(title="末端轨迹 (TCP Trajectory X-Y)")
+        self.ee_plot.setLabel('left', 'Y 位置 (米)', units='m')
+        self.ee_plot.setLabel('bottom', 'X 位置 (米)', units='m')
+        self.ee_plot.addLegend()
+        
+        self.ft_plot = pg.PlotWidget(title="力/力矩传感器 (Force/Torque Sensor)")
+        self.ft_plot.setLabel('left', '力/力矩 (N/Nm)')
+        self.ft_plot.setLabel('bottom', '时间 (秒)', units='s')
+        self.ft_plot.addLegend()
+        
+        self.vel_plot = pg.PlotWidget(title="关节速度 (Joint Velocities)")
+        self.vel_plot.setLabel('left', '角速度 (度/秒)', units='°/s')
+        self.vel_plot.setLabel('bottom', '时间 (秒)', units='s')
+        self.vel_plot.addLegend()
+        
+        self.pos_plot = pg.PlotWidget(title="关节位置 (Joint Positions)")
+        self.pos_plot.setLabel('left', '角度 (度)', units='°')
+        self.pos_plot.setLabel('bottom', '时间 (秒)', units='s')
+        self.pos_plot.addLegend()
         
         # 为所有图表添加交互功能并优化显示尺寸
         self.all_plots = [self.joint_plot, self.ee_plot, self.ft_plot, self.vel_plot, self.pos_plot]
@@ -1183,15 +1336,43 @@ class RobotArmControlApp(QMainWindow):
                 background-color: #e0e0e0;
             }
         """)
-        # 曲线对象
+        # 曲线对象 - 优化图例标识
         joint_colors = ['#e41a1c','#377eb8','#4daf4a','#984ea3','#ff7f00','#a65628','#f781bf']
-        self.joint_curves = [self.joint_plot.plot(pen=pg.mkPen(color=joint_colors[i], width=2), name=f"J{i+1}") for i in range(7)]
-        self.ee_curve = self.ee_plot.plot(pen=pg.mkPen('g', width=2, style=pg.QtCore.Qt.DashLine), symbol='o', symbolBrush='g', name="TCP轨迹")
-        ft_colors = ['#e41a1c','#377eb8','#4daf4a','#984ea3','#ff7f00','#a65628']
-        ft_styles = [pg.QtCore.Qt.SolidLine, pg.QtCore.Qt.DashLine, pg.QtCore.Qt.DotLine, pg.QtCore.Qt.DashDotLine, pg.QtCore.Qt.DashDotDotLine, pg.QtCore.Qt.SolidLine]
-        self.ft_curves = [self.ft_plot.plot(pen=pg.mkPen(color=ft_colors[i], width=2, style=ft_styles[i]), name=n) for i, n in enumerate(["Fx","Fy","Fz","Tx","Ty","Tz"])]
-        self.vel_curves = [self.vel_plot.plot(pen=pg.mkPen(color=joint_colors[i], width=2, style=pg.QtCore.Qt.DashLine), name=f"J{i+1}") for i in range(7)]
-        self.pos_curves = [self.pos_plot.plot(pen=pg.mkPen(color=joint_colors[i], width=3), name=f"J{i+1}") for i in range(7)]
+        joint_names = ['关节1 (Base)', '关节2 (Shoulder)', '关节3 (Elbow)', '关节4 (Wrist1)', 
+                      '关节5 (Wrist2)', '关节6 (Wrist3)', '关节7 (Flange)']
+        
+        # 关节角度曲线
+        self.joint_curves = []
+        for i in range(7):
+            curve = self.joint_plot.plot(pen=pg.mkPen(color=joint_colors[i], width=2), name=joint_names[i])
+            self.joint_curves.append(curve)
+        
+        # TCP轨迹曲线
+        self.ee_curve = self.ee_plot.plot(pen=pg.mkPen('#2E8B57', width=2, style=pg.QtCore.Qt.SolidLine), 
+                                          symbol='o', symbolBrush='#2E8B57', symbolSize=4, name="TCP轨迹")
+        
+        # 力/力矩传感器曲线
+        ft_colors = ['#DC143C','#4169E1','#32CD32','#FF8C00','#9932CC','#8B4513']
+        ft_styles = [pg.QtCore.Qt.SolidLine, pg.QtCore.Qt.SolidLine, pg.QtCore.Qt.SolidLine, 
+                    pg.QtCore.Qt.DashLine, pg.QtCore.Qt.DashLine, pg.QtCore.Qt.DashLine]
+        ft_names = ["Fx (X轴力)", "Fy (Y轴力)", "Fz (Z轴力)", "Tx (X轴力矩)", "Ty (Y轴力矩)", "Tz (Z轴力矩)"]
+        self.ft_curves = []
+        for i, name in enumerate(ft_names):
+            curve = self.ft_plot.plot(pen=pg.mkPen(color=ft_colors[i], width=2, style=ft_styles[i]), name=name)
+            self.ft_curves.append(curve)
+        
+        # 关节速度曲线
+        self.vel_curves = []
+        for i in range(7):
+            curve = self.vel_plot.plot(pen=pg.mkPen(color=joint_colors[i], width=2, style=pg.QtCore.Qt.DashLine), 
+                                     name=f"{joint_names[i]} 速度")
+            self.vel_curves.append(curve)
+        
+        # 关节位置曲线
+        self.pos_curves = []
+        for i in range(7):
+            curve = self.pos_plot.plot(pen=pg.mkPen(color=joint_colors[i], width=2), name=f"{joint_names[i]} 位置")
+            self.pos_curves.append(curve)
         self.monitor_tab.addTab(self.joint_plot, "关节角度")
         self.monitor_tab.addTab(self.ee_plot, "末端轨迹")
         self.monitor_tab.addTab(self.ft_plot, "力/力矩")
@@ -1289,18 +1470,22 @@ class RobotArmControlApp(QMainWindow):
             return
         import time
         
-        # 更新基本显示 - 将弧度转换为度数显示
-        text = ', '.join([f'{a * 180 / np.pi:.2f}°' for a in joint_angles])
-        self.monitor_joint_label.setText(f'关节角度: {text}')
+        # 更新关节数据表格 - 将弧度转换为度数显示
+        if hasattr(self, 'joints_table'):
+            for i, angle in enumerate(joint_angles):
+                if i < 7:  # A1-A7
+                    angle_deg = angle * 180 / np.pi
+                    self.joints_table.setItem(i, 1, QTableWidgetItem(f'{angle_deg:.2f}'))
         
         t = time.time()
         self.time_history.append(t)
         
-        # 更新关节角度历史数据
+        # 更新关节角度历史数据（转换为度数显示）
         for i, a in enumerate(joint_angles):
             if i < len(self.joint_history):
-                self.joint_history[i].append(a)
-                self.joint_pos_history[i].append(a)
+                angle_deg = a * 180 / np.pi  # 转换为度数
+                self.joint_history[i].append(angle_deg)
+                self.joint_pos_history[i].append(angle_deg)
                 
                 # 数据点数量控制
                 if len(self.joint_history[i]) > self.max_data_points:
@@ -1322,14 +1507,34 @@ class RobotArmControlApp(QMainWindow):
             if i < len(self.joint_pos_history):
                 curve.setData(self.time_history, self.joint_pos_history[i])
 
-    def update_monitor_ee(self, ee_pos):
+    def update_monitor_ee(self, tcp_pose):
         if not hasattr(self, 'ee_curve') or self.ee_curve is None:
             return
-        text = ', '.join([f'{p:.3f}' for p in ee_pos])
-        self.monitor_ee_label.setText(f'末端位置: {text}')
+        
+        # 更新TCP位置和姿态表格（合并表格）
+        if hasattr(self, 'tcp_table') and len(tcp_pose) >= 3:
+            # 更新位置数据 (X, Y, Z)
+            for i in range(3):
+                if i < len(tcp_pose):
+                    self.tcp_table.setItem(i, 1, QTableWidgetItem(f'{tcp_pose[i]:.4f}'))
+            
+            # 更新姿态数据（四元数转欧拉角）
+            if len(tcp_pose) >= 7:  # 完整的TCP姿态数据 [x, y, z, qw, qx, qy, qz]
+                # 提取四元数分量
+                qw, qx, qy, qz = tcp_pose[3], tcp_pose[4], tcp_pose[5], tcp_pose[6]
+                
+                # 转换为欧拉角（弧度）
+                roll, pitch, yaw = quaternion_to_euler(qw, qx, qy, qz)
+                
+                # 转换为度数并更新表格
+                euler_angles = [roll, pitch, yaw]
+                for i, angle_rad in enumerate(euler_angles):
+                    angle_deg = angle_rad * 180 / math.pi
+                    self.tcp_table.setItem(i + 3, 1, QTableWidgetItem(f'{angle_deg:.2f}'))
+        
         # 末端轨迹（只画X-Y）
-        if len(ee_pos) >= 2:
-            self.ee_xy_history.append((ee_pos[0], ee_pos[1]))
+        if len(tcp_pose) >= 2:
+            self.ee_xy_history.append((tcp_pose[0], tcp_pose[1]))
             if len(self.ee_xy_history) > 200:
                 self.ee_xy_history = self.ee_xy_history[-200:]
             x, y = zip(*self.ee_xy_history)
@@ -1362,12 +1567,14 @@ class RobotArmControlApp(QMainWindow):
         """更新关节速度显示"""
         # 将弧度/秒转换为度/秒显示
         vel_text = ', '.join([f'{v * 180 / np.pi:.3f}°/s' for v in velocities])
-        self.monitor_velocity_label.setText(f'关节速度: {vel_text}')
+        if hasattr(self, 'monitor_velocity_label'):
+            self.monitor_velocity_label.setText(f'关节速度: {vel_text}')
         
-        # 更新速度历史数据
+        # 更新速度历史数据（转换为度/秒）
         for i, v in enumerate(velocities):
             if i < len(self.joint_vel_history):
-                self.joint_vel_history[i].append(v)
+                vel_deg_per_sec = v * 180 / np.pi  # 转换为度/秒
+                self.joint_vel_history[i].append(vel_deg_per_sec)
                 if len(self.joint_vel_history[i]) > self.max_data_points:
                     self.joint_vel_history[i] = self.joint_vel_history[i][-self.max_data_points:]
         
@@ -1378,8 +1585,11 @@ class RobotArmControlApp(QMainWindow):
     
     def update_monitor_torque(self, torques):
         """更新关节力矩显示"""
-        avg_torque = sum(torques) / len(torques) if torques else 0
-        self.monitor_torque_label.setText(f'平均力矩: {avg_torque:.2f} Nm')
+        # 更新关节数据表格中的扭矩列
+        if hasattr(self, 'joints_table'):
+            for i, torque in enumerate(torques):
+                if i < 7:  # A1-A7
+                    self.joints_table.setItem(i, 2, QTableWidgetItem(f'{torque:.3f}'))
         
         # 更新力矩历史数据
         import time
@@ -1398,10 +1608,22 @@ class RobotArmControlApp(QMainWindow):
     # 力/力矩数据更新
     def update_monitor_ft(self, ft_data):
         """更新力/力矩传感器数据"""
-        # ft_data: [Fx, Fy, Fz, Tx, Ty, Tz]
+        # ft_data: [Fx, Fy, Fz, Mx, My, Mz]
         if len(ft_data) >= 6:
             import time
             t = time.time()
+            
+            # 更新TCP力/力矩表格（合并表格）
+            if hasattr(self, 'ft_table'):
+                # 更新力数据 (Fx, Fy, Fz)
+                for i in range(3):
+                    if i < len(ft_data):
+                        self.ft_table.setItem(i, 1, QTableWidgetItem(f'{ft_data[i]:.3f}'))
+                
+                # 更新力矩数据 (Mx, My, Mz)
+                for i in range(3):
+                    if i + 3 < len(ft_data):
+                        self.ft_table.setItem(i + 3, 1, QTableWidgetItem(f'{ft_data[i + 3]:.3f}'))
             
             for i, v in enumerate(ft_data[:6]):  # 只取前6个值
                 if i < len(self.ft_history):
@@ -1972,6 +2194,17 @@ class RobotArmControlApp(QMainWindow):
         
         return '\n'.join(formatted_lines)
 
+    def on_global_vars_apply(self, variables):
+        """处理全局变量应用事件"""
+        try:
+            if hasattr(self, 'robot_control') and self.robot_control:
+                self.robot_control.set_global_variables(variables)
+                self.global_status_text.append(f'已应用 {len(variables)} 个全局变量到机器人')
+            else:
+                self.global_status_text.append('机器人未连接，无法应用全局变量')
+        except Exception as e:
+            self.global_status_text.append(f'应用全局变量失败: {str(e)}')
+    
     def on_robot_error(self, msg):
         self.global_status_text.append(f'[机器人错误] {msg}')
 
@@ -2067,6 +2300,9 @@ class RobotArmControlApp(QMainWindow):
                 self.robot_control.auto_recovered.connect(self.on_auto_recovered)
                 self.robot_control.tool_updated.connect(self.on_tool_updated)
                 self.robot_control.global_vars_updated.connect(self.on_global_vars_updated)
+                # 连接全局变量组件的信号
+                if hasattr(self, 'global_vars_widget'):
+                    self.robot_control.global_vars_updated.connect(self.global_vars_widget.update_variables)
                 self.robot_control.plan_list_updated.connect(self.on_plan_list_updated)
                 self.robot_control.plan_info_updated.connect(self.on_plan_info_updated)
                 # 启动robot_control线程（如有run方法）
@@ -2235,16 +2471,15 @@ class RobotArmControlApp(QMainWindow):
             self.global_status_text.append('已隐藏3D视图，左侧界面已全屏化')
             
             # 优化监控图表布局 - 3D视图关闭时图表获得更大空间
-            if hasattr(self, 'monitor_tab') and hasattr(self, 'text_widget'):
-                # 进一步减少文本区域宽度，给图表更多空间
-                self.text_widget.setFixedWidth(280)  # 适当调整文本区域宽度
+            if hasattr(self, 'monitor_tab'):
                 # 扩大图表显示区域以利用全屏空间
                 self.monitor_tab.setMinimumSize(total_width - 350, 450)  # 根据全屏宽度调整
                 self.monitor_tab.setMaximumHeight(800)  # 增加最大高度
                 # 优化每个图表的尺寸以适应全屏
-                for plot in self.all_plots:
-                    plot.setMinimumSize(total_width - 400, 400)  # 根据全屏宽度调整图表尺寸
-                    plot.setMaximumHeight(750)
+                if hasattr(self, 'all_plots'):
+                    for plot in self.all_plots:
+                        plot.setMinimumSize(total_width - 400, 400)  # 根据全屏宽度调整图表尺寸
+                        plot.setMaximumHeight(750)
         else:
             # 显示3D视图，恢复分屏布局
             self.gl_renderer.setVisible(True)
@@ -2268,16 +2503,15 @@ class RobotArmControlApp(QMainWindow):
             self.global_status_text.append('已显示3D视图，恢复分屏布局')
             
             # 恢复监控图表原始布局
-            if hasattr(self, 'monitor_tab') and hasattr(self, 'text_widget'):
-                # 恢复文本区域原始宽度
-                self.text_widget.setFixedWidth(300)  # 恢复到原始固定宽度
+            if hasattr(self, 'monitor_tab'):
                 # 恢复图表显示区域原始尺寸
                 self.monitor_tab.setMinimumSize(450, 350)  # 恢复原始最小尺寸
                 self.monitor_tab.setMaximumHeight(550)  # 恢复原始最大高度
                 # 恢复每个图表的原始尺寸
-                for plot in self.all_plots:
-                    plot.setMinimumSize(400, 300)  # 恢复原始图表尺寸
-                    plot.setMaximumHeight(500)
+                if hasattr(self, 'all_plots'):
+                    for plot in self.all_plots:
+                        plot.setMinimumSize(400, 300)  # 恢复原始图表尺寸
+                        plot.setMaximumHeight(500)
     
     def toggle_right_panel(self):
         """切换右侧面板的显示/隐藏状态 - 优化setSizes调用"""
@@ -2378,7 +2612,7 @@ class RobotArmControlApp(QMainWindow):
                 self._right_panel_hidden = False
         
         # 调整监控组中图表的显示 - 考虑3D视图状态
-        if hasattr(self, 'text_widget') and hasattr(self, 'monitor_tab'):
+        if hasattr(self, 'monitor_tab'):
             # 检查3D视图是否隐藏
             is_3d_hidden = hasattr(self, 'btn_toggle_3d_view') and self.btn_toggle_3d_view.isChecked()
             
@@ -2387,45 +2621,46 @@ class RobotArmControlApp(QMainWindow):
                 self.left_tab.setMinimumWidth(width - 20)
                 self.left_tab.setMaximumWidth(width)
                 
-                # 给图表更多空间
-                self.text_widget.setFixedWidth(280 if width > 1000 else 250)
                 # 根据全屏宽度调整图表尺寸
-                chart_width = width - 350  # 减去文本区域和边距
+                chart_width = width - 350  # 减去边距
                 if width < 1000:
                     self.monitor_tab.setMinimumSize(chart_width, 400)
-                    for plot in self.all_plots:
-                        plot.setMinimumSize(chart_width - 50, 350)
+                    if hasattr(self, 'all_plots'):
+                        for plot in self.all_plots:
+                            plot.setMinimumSize(chart_width - 50, 350)
                 elif width < 1400:
                     self.monitor_tab.setMinimumSize(chart_width, 450)
-                    for plot in self.all_plots:
-                        plot.setMinimumSize(chart_width - 50, 400)
+                    if hasattr(self, 'all_plots'):
+                        for plot in self.all_plots:
+                            plot.setMinimumSize(chart_width - 50, 400)
                 else:
                     self.monitor_tab.setMinimumSize(chart_width, 500)
-                    for plot in self.all_plots:
-                        plot.setMinimumSize(chart_width - 50, 450)
+                    if hasattr(self, 'all_plots'):
+                        for plot in self.all_plots:
+                            plot.setMinimumSize(chart_width - 50, 450)
             else:
                 # 3D视图显示时，恢复标准分屏布局
                 if width < 1000:
                     self.left_tab.setMinimumWidth(280)
                     self.left_tab.setMaximumWidth(350)
-                    self.text_widget.setFixedWidth(250)
                     self.monitor_tab.setMinimumSize(350, 300)
-                    for plot in self.all_plots:
-                        plot.setMinimumSize(300, 250)
+                    if hasattr(self, 'all_plots'):
+                        for plot in self.all_plots:
+                            plot.setMinimumSize(300, 250)
                 elif width < 1400:
                     self.left_tab.setMinimumWidth(320)
                     self.left_tab.setMaximumWidth(400)
-                    self.text_widget.setFixedWidth(280)
                     self.monitor_tab.setMinimumSize(400, 350)
-                    for plot in self.all_plots:
-                        plot.setMinimumSize(350, 300)
+                    if hasattr(self, 'all_plots'):
+                        for plot in self.all_plots:
+                            plot.setMinimumSize(350, 300)
                 else:
                     self.left_tab.setMinimumWidth(350)
                     self.left_tab.setMaximumWidth(500)
-                    self.text_widget.setFixedWidth(300)
                     self.monitor_tab.setMinimumSize(450, 350)
-                    for plot in self.all_plots:
-                        plot.setMinimumSize(400, 300)
+                    if hasattr(self, 'all_plots'):
+                        for plot in self.all_plots:
+                            plot.setMinimumSize(400, 300)
         
         # 只有在需要时才调用setSizes
         if new_sizes and not self._sizes_similar(current_sizes, new_sizes, tolerance=20):
