@@ -1,7 +1,7 @@
 '''
 Author: LK
 Date: 2025-02-07 22:07:28
-LastEditTime: 2025-08-11 08:40:23
+LastEditTime: 2025-08-12 08:57:32
 LastEditors: LK
 FilePath: /Demo/app/main.py
 '''
@@ -377,6 +377,25 @@ class RobotArmControlApp(QMainWindow):
         global_vars_layout.addSpacerItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
         global_vars_scroll.setWidget(global_vars_page)
         self.left_tab.addTab(global_vars_scroll, '全局变量')
+        
+        # 高级控制页
+        advanced_scroll = QScrollArea()
+        advanced_scroll.setWidgetResizable(True)
+        advanced_page = QWidget()
+        advanced_layout = QVBoxLayout(advanced_page)
+        advanced_layout.setSpacing(8)
+        
+        # 导入高级控制组件
+        from app.ui.advanced_control_widget import AdvancedControlWidget
+        self.advanced_control_widget = AdvancedControlWidget(robot_control=self.robot_control)
+        
+        # 连接信号
+        self.advanced_control_widget.status_updated.connect(self.update_status_message)
+        self.advanced_control_widget.error_occurred.connect(self.show_error_message)
+        
+        advanced_layout.addWidget(self.advanced_control_widget)
+        advanced_scroll.setWidget(advanced_page)
+        self.left_tab.addTab(advanced_scroll, '高级控制')
         # Splitter布局 - 优化分屏功能
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.left_tab)
@@ -1497,15 +1516,21 @@ class RobotArmControlApp(QMainWindow):
         if len(self.time_history) > self.max_data_points:
             self.time_history = self.time_history[-self.max_data_points:]
         
-        # 更新关节角度图表曲线
+        # 更新关节角度图表曲线 - 确保数组长度匹配
         for i, curve in enumerate(self.joint_curves):
             if i < len(self.joint_history):
-                curve.setData(self.time_history, self.joint_history[i])
+                # 确保两个数组长度相同
+                min_len = min(len(self.time_history), len(self.joint_history[i]))
+                if min_len > 0:
+                    curve.setData(self.time_history[-min_len:], self.joint_history[i][-min_len:])
         
-        # 更新关节位置图表曲线
+        # 更新关节位置图表曲线 - 确保数组长度匹配
         for i, curve in enumerate(self.pos_curves):
             if i < len(self.joint_pos_history):
-                curve.setData(self.time_history, self.joint_pos_history[i])
+                # 确保两个数组长度相同
+                min_len = min(len(self.time_history), len(self.joint_pos_history[i]))
+                if min_len > 0:
+                    curve.setData(self.time_history[-min_len:], self.joint_pos_history[i][-min_len:])
 
     def update_monitor_ee(self, tcp_pose):
         if not hasattr(self, 'ee_curve') or self.ee_curve is None:
@@ -1578,10 +1603,13 @@ class RobotArmControlApp(QMainWindow):
                 if len(self.joint_vel_history[i]) > self.max_data_points:
                     self.joint_vel_history[i] = self.joint_vel_history[i][-self.max_data_points:]
         
-        # 更新速度图表（使用共享的时间历史）
+        # 更新速度图表（使用共享的时间历史） - 确保数组长度匹配
         for i, curve in enumerate(self.vel_curves):
-            if i < len(self.joint_vel_history) and len(self.time_history) == len(self.joint_vel_history[i]):
-                curve.setData(self.time_history, self.joint_vel_history[i])
+            if i < len(self.joint_vel_history) and len(self.time_history) > 0:
+                # 确保两个数组长度相同
+                min_len = min(len(self.time_history), len(self.joint_vel_history[i]))
+                if min_len > 0:
+                    curve.setData(self.time_history[-min_len:], self.joint_vel_history[i][-min_len:])
     
     def update_monitor_torque(self, torques):
         """更新关节力矩显示"""
@@ -1592,14 +1620,20 @@ class RobotArmControlApp(QMainWindow):
                     self.joints_table.setItem(i, 2, QTableWidgetItem(f'{torque:.3f}'))
         
         # 更新力矩历史数据
-        import time
-        t = time.time()
-        
         for i, torque in enumerate(torques):
             if i < len(self.joint_torque_history):
                 self.joint_torque_history[i].append(torque)
                 if len(self.joint_torque_history[i]) > self.max_data_points:
                     self.joint_torque_history[i] = self.joint_torque_history[i][-self.max_data_points:]
+        
+        # 更新力矩图表 - 确保数组长度匹配
+        if hasattr(self, 'torque_curves'):
+            for i, curve in enumerate(self.torque_curves):
+                if i < len(self.joint_torque_history) and len(self.time_history) > 0:
+                    # 确保两个数组长度相同
+                    min_len = min(len(self.time_history), len(self.joint_torque_history[i]))
+                    if min_len > 0:
+                        curve.setData(self.time_history[-min_len:], self.joint_torque_history[i][-min_len:])
     
     def update_monitor_mode(self, mode):
         """更新机器人模式显示"""
@@ -1625,16 +1659,31 @@ class RobotArmControlApp(QMainWindow):
                     if i + 3 < len(ft_data):
                         self.ft_table.setItem(i + 3, 1, QTableWidgetItem(f'{ft_data[i + 3]:.3f}'))
             
+            # 确保时间历史数据与力/力矩数据同步
+            if not hasattr(self, 'time_history'):
+                self.time_history = []
+            
+            # 只有当ft_history有数据时才添加时间戳
+            if hasattr(self, 'ft_history') and len(self.ft_history) > 0:
+                self.time_history.append(t)
+                
+                # 控制时间历史长度
+                if len(self.time_history) > self.max_data_points:
+                    self.time_history = self.time_history[-self.max_data_points:]
+            
             for i, v in enumerate(ft_data[:6]):  # 只取前6个值
                 if i < len(self.ft_history):
                     self.ft_history[i].append(v)
                     if len(self.ft_history[i]) > self.max_data_points:
                         self.ft_history[i] = self.ft_history[i][-self.max_data_points:]
             
-            # 更新力/力矩图表
+            # 更新力/力矩图表 - 确保数组长度匹配
             for i, curve in enumerate(self.ft_curves):
                 if i < len(self.ft_history) and len(self.time_history) > 0:
-                    curve.setData(self.time_history, self.ft_history[i])
+                    # 确保两个数组长度相同
+                    min_len = min(len(self.time_history), len(self.ft_history[i]))
+                    if min_len > 0:
+                        curve.setData(self.time_history[-min_len:], self.ft_history[i][-min_len:])
     
     # 新增功能函数
     def reset_chart_views(self):
@@ -2207,10 +2256,19 @@ class RobotArmControlApp(QMainWindow):
     
     def on_robot_error(self, msg):
         self.global_status_text.append(f'[机器人错误] {msg}')
+    
+    def update_status_message(self, message):
+        """更新状态消息到全局状态栏"""
+        self.global_status_text.append(f'[高级控制] {message}')
+    
+    def show_error_message(self, message):
+        """显示错误消息到全局状态栏"""
+        self.global_status_text.append(f'[错误] {message}')
 
     def on_connect_robot_sn(self):
         # 检查当前连接状态，决定是连接还是断开
-        if hasattr(self, 'robot_control') and self.robot_control and self.is_robot_connected():
+        # 通过按钮文本来判断当前状态更可靠
+        if self.sn_connect_btn.text() == '断开':
             # 当前已连接，执行断开操作
             self.disconnect_robot()
         else:
@@ -2223,7 +2281,10 @@ class RobotArmControlApp(QMainWindow):
             return False
         
         if self.hardware and hasattr(self.robot_control, 'robot') and self.robot_control.robot:
-            return self.robot_control.robot.connected()
+            try:
+                return self.robot_control.robot.connected()
+            except Exception:
+                return False
         else:
             # 仿真模式下，如果robot_control存在且running标志为True，则认为已连接
             return hasattr(self.robot_control, 'running') and self.robot_control.running
@@ -2272,6 +2333,10 @@ class RobotArmControlApp(QMainWindow):
                 else:
                     self.global_status_text.append(f'机器人连接失败: 无法建立与 {sn} 的连接')
                     self.set_status_light(False)
+                    # 连接失败时清理robot_control对象
+                    if hasattr(self.robot_control, 'stop'):
+                        self.robot_control.stop()
+                    self.robot_control = None
                     connection_success = False
             else:
                 # 仿真模式或无硬件时
@@ -2311,6 +2376,9 @@ class RobotArmControlApp(QMainWindow):
                 
                 # 自动刷新工具列表
                 self.on_refresh_tools()
+                
+                # 自动刷新Plan列表
+                self.on_refresh_plan_list()
                 
                 self.save_last_robot_sn(sn)
                 self.update_mode_label()
@@ -2944,6 +3012,7 @@ def main():
     parser.add_argument('--sim', action='store_true', help='使用仿真/教学模式')
     parser.add_argument('--hardware', action='store_true', help='强制硬件模式')
     args = parser.parse_args()
+    
     # 使用全局变量检测flexivrdk
     flexiv_ok = FLEXIV_AVAILABLE
     if args.sim:
@@ -2952,10 +3021,41 @@ def main():
         hardware = True
     else:
         hardware = flexiv_ok
+    
+    # macOS特定设置，消除GUI警告
+    import platform
+    if platform.system() == 'Darwin':  # macOS
+        # 设置Qt应用程序属性，避免macOS GUI警告
+        os.environ['QT_MAC_WANTS_LAYER'] = '1'
+        # 禁用输入法相关的警告
+        os.environ['QT_IM_MODULE'] = ''
+        # 禁用macOS原生事件处理
+        os.environ['QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM'] = '1'
+        # 设置高DPI支持
+        QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+        QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+        # 禁用窗口移动动画相关警告
+        QApplication.setAttribute(Qt.AA_DontShowIconsInMenus, True)
+        # 禁用原生窗口装饰
+        QApplication.setAttribute(Qt.AA_MacPluginApplication, True)
+        # 禁用Cocoa事件处理
+        QApplication.setAttribute(Qt.AA_DisableWindowContextHelpButton, True)
+    
     app = QApplication(sys.argv)
+    
+    # macOS特定的应用程序设置
+    if platform.system() == 'Darwin':
+        # 设置应用程序名称和组织
+        app.setApplicationName("Flexiv Robot Control")
+        app.setOrganizationName("Flexiv")
+        app.setOrganizationDomain("flexiv.com")
+        # 禁用原生菜单栏（可能导致警告）
+        app.setAttribute(Qt.AA_DontUseNativeMenuBar, True)
+    
     robot = None
     if hardware and FLEXIV_AVAILABLE:
         robot = flexivrdk.Robot("Rizon10-062357")
+    
     try:
         window = RobotArmControlApp(robot=robot, hardware=hardware)
         window.show()
