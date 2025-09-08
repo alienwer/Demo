@@ -11,5 +11,6 @@ sphinx>=5.0.0
 pyglet>=1.5.31
 numpy>=1.21.0
 spdlog>=1.8.0
-flexivrdk>=1.6.0
+flexivrdk>=1.7.0
 pyqtgraph>=0.13.7
+psutil>=5.9.0

@@ -13,7 +13,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QPushButton, QLabel, QComboBox, QSpinBox, QDoubleSpinBox,
                              QGroupBox, QLineEdit, QTextEdit, QSlider, QFileDialog, QDesktopWidget,
                              QSpacerItem, QSizePolicy, QTabWidget, QScrollArea, QSplitter,
-                             QTableWidget, QTableWidgetItem, QHeaderView)
+                             QTableWidget, QTableWidgetItem, QHeaderView, QDockWidget,
+                             QGraphicsScene, QGraphicsView, QGridLayout)
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QBrush, QFont
 import qtawesome as qta
@@ -409,14 +410,25 @@ class RobotArmControlApp(QMainWindow):
         # 3D渲染器
         self.gl_renderer = GLRenderer()
         
-        # 数据显示面板
-        self.data_panel = self.create_data_display_panel()
-        self.data_panel.setMaximumHeight(200)
-        self.data_panel.setMinimumHeight(180)
+        # 创建悬浮数据显示面板（直接集成到3D视图中）
+        self.floating_data_panel = self.create_floating_data_panel()
+        
+        # 创建3D视图容器
+        self.gl_container = QWidget()
+        gl_container_layout = QVBoxLayout(self.gl_container)
+        gl_container_layout.setContentsMargins(0, 0, 0, 0)
+        gl_container_layout.setSpacing(0)
+        
+        # 添加3D视图到容器
+        gl_container_layout.addWidget(self.gl_renderer)
+        
+        # 将悬浮面板添加到3D视图容器中（使用setParent和raise_确保在最上层）
+        self.floating_data_panel.setParent(self.gl_container)
+        self.floating_data_panel.setGeometry(20, 20, 500, 250)  # 设置位置和大小
+        self.floating_data_panel.raise_()  # 确保在最上层显示
         
         # 添加到右侧布局
-        right_layout.addWidget(self.gl_renderer, 1)  # 3D视图占主要空间
-        right_layout.addWidget(self.data_panel, 0)   # 数据面板固定高度
+        right_layout.addWidget(self.gl_container, 1)  # 3D视图容器占主要空间
         
         self.splitter.addWidget(self.right_widget)
         
@@ -463,7 +475,7 @@ class RobotArmControlApp(QMainWindow):
         self._splitter_sizes = None
     
     def create_data_display_panel(self):
-        """创建数据显示面板 - 显示关节、TCP位姿和力/力矩数据"""
+        """创建数据显示面板 - 紧凑平铺布局显示关节、TCP位姿和力/力矩数据"""
         panel = QGroupBox('机器人实时数据')
         panel.setStyleSheet("""
             QGroupBox {
@@ -486,110 +498,132 @@ class RobotArmControlApp(QMainWindow):
         main_layout = QHBoxLayout(panel)
         main_layout.setSpacing(8)
         
-        # 关节数据表格
+        # 关节数据 - 紧凑平铺布局
         joints_group = QGroupBox('关节数据 (A1-A7)')
-        joints_layout = QVBoxLayout(joints_group)
+        joints_layout = QGridLayout(joints_group)
+        joints_layout.setSpacing(4)
         
-        self.joints_table = QTableWidget(7, 3)
-        self.joints_table.setHorizontalHeaderLabels(['关节', '位置 (deg)', '扭矩 (Nm)'])
-        self.joints_table.setVerticalHeaderLabels([f'A{i+1}' for i in range(7)])
-        self.joints_table.setMaximumHeight(160)
-        self.joints_table.horizontalHeader().setStretchLastSection(True)
-        self.joints_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.joints_table.setAlternatingRowColors(True)
-        
-        # 初始化关节表格数据
+        # 创建关节数据标签
+        self.joint_labels = {}
         for i in range(7):
-            self.joints_table.setItem(i, 0, QTableWidgetItem(f'A{i+1}'))
-            self.joints_table.setItem(i, 1, QTableWidgetItem('-'))
-            self.joints_table.setItem(i, 2, QTableWidgetItem('-'))
-            for j in range(3):
-                item = self.joints_table.item(i, j)
-                if item:
-                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            joint_label = QLabel(f'A{i+1}:')
+            joint_label.setStyleSheet('font-weight: bold; color: #2c3e50;')
+            joints_layout.addWidget(joint_label, i, 0)
+            
+            pos_label = QLabel('-')
+            pos_label.setStyleSheet('color: #2980b9; min-width: 60px;')
+            joints_layout.addWidget(pos_label, i, 1)
+            
+            torque_label = QLabel('-')
+            torque_label.setStyleSheet('color: #c0392b; min-width: 60px;')
+            joints_layout.addWidget(torque_label, i, 2)
+            
+            self.joint_labels[f'A{i+1}_pos'] = pos_label
+            self.joint_labels[f'A{i+1}_torque'] = torque_label
         
-        joints_layout.addWidget(self.joints_table)
-        
-        # TCP位姿数据
+        # TCP位姿数据 - 紧凑平铺布局
         tcp_group = QGroupBox('TCP位姿')
-        tcp_layout = QVBoxLayout(tcp_group)
+        tcp_layout = QGridLayout(tcp_group)
+        tcp_layout.setSpacing(4)
         
-        # TCP位置和姿态表格（合并为一个表格）
-        self.tcp_table = QTableWidget(6, 2)
-        self.tcp_table.setHorizontalHeaderLabels(['参数', '数值'])
-        self.tcp_table.setVerticalHeaderLabels(['X (m)', 'Y (m)', 'Z (m)', 'Rx (deg)', 'Ry (deg)', 'Rz (deg)'])
-        self.tcp_table.setMaximumHeight(160)
-        self.tcp_table.horizontalHeader().setStretchLastSection(True)
-        self.tcp_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.tcp_table.setAlternatingRowColors(True)
+        tcp_params = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz']
+        self.tcp_labels = {}
+        for i, param in enumerate(tcp_params):
+            param_label = QLabel(f'{param}:')
+            param_label.setStyleSheet('font-weight: bold; color: #2c3e50;')
+            tcp_layout.addWidget(param_label, i, 0)
+            
+            value_label = QLabel('-')
+            value_label.setStyleSheet('color: #27ae60; min-width: 70px;')
+            tcp_layout.addWidget(value_label, i, 1)
+            
+            self.tcp_labels[param] = value_label
         
-        # 初始化TCP表格数据
-        tcp_labels = ['X (m)', 'Y (m)', 'Z (m)', 'Rx (deg)', 'Ry (deg)', 'Rz (deg)']
-        for i, label in enumerate(tcp_labels):
-            self.tcp_table.setItem(i, 0, QTableWidgetItem(label))
-            self.tcp_table.setItem(i, 1, QTableWidgetItem('-'))
-            for j in range(2):
-                item = self.tcp_table.item(i, j)
-                if item:
-                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-        
-        tcp_layout.addWidget(self.tcp_table)
-        
-        # TCP力/力矩数据
-        ft_group = QGroupBox('TCP力/力矩')
-        ft_layout = QVBoxLayout(ft_group)
-        
-        self.ft_table = QTableWidget(6, 2)
-        self.ft_table.setHorizontalHeaderLabels(['参数', '数值'])
-        self.ft_table.setVerticalHeaderLabels(['Fx (N)', 'Fy (N)', 'Fz (N)', 'Mx (Nm)', 'My (Nm)', 'Mz (Nm)'])
-        self.ft_table.setMaximumHeight(160)
-        self.ft_table.horizontalHeader().setStretchLastSection(True)
-        self.ft_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.ft_table.setAlternatingRowColors(True)
-        
-        # 初始化力/力矩表格数据
-        ft_labels = ['Fx (N)', 'Fy (N)', 'Fz (N)', 'Mx (Nm)', 'My (Nm)', 'Mz (Nm)']
-        for i, label in enumerate(ft_labels):
-            self.ft_table.setItem(i, 0, QTableWidgetItem(label))
-            self.ft_table.setItem(i, 1, QTableWidgetItem('-'))
-            for j in range(2):
-                item = self.ft_table.item(i, j)
-                if item:
-                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-        
-        ft_layout.addWidget(self.ft_table)
-        
-        # 设置表格样式
-        table_style = """
-            QTableWidget {
-                gridline-color: #d0d0d0;
-                background-color: white;
-                font-size: 9px;
-                border: 1px solid #cccccc;
-                border-radius: 4px;
-            }
-            QTableWidget::item {
-                padding: 2px;
-                text-align: center;
-            }
-            QHeaderView::section {
-                background-color: #e8f4fd;
-                padding: 3px;
-                border: 1px solid #d0d0d0;
-                font-weight: bold;
-                font-size: 9px;
-            }
-        """
-        
-        for table in [self.joints_table, self.tcp_table, self.ft_table]:
-            table.setStyleSheet(table_style)
+
         
         # 添加到主布局
         main_layout.addWidget(joints_group)
         main_layout.addWidget(tcp_group)
-        main_layout.addWidget(ft_group)
         
         return panel
+
+    def create_floating_data_panel(self):
+        """创建集成在3D视图中的悬浮数据显示面板"""
+        
+        # 创建透明悬浮面板（不再使用QDockWidget）
+        floating_panel = QWidget()
+        floating_panel.setObjectName('floating_data_panel')
+        floating_panel.setAttribute(Qt.WA_TranslucentBackground)
+        
+        # 设置悬浮面板样式 - 高透明度背景
+        floating_panel.setStyleSheet("""
+            #floating_data_panel {
+                background-color: rgba(40, 44, 52, 0.85);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+                border-radius: 6px;
+            }
+        """)
+        
+        # 创建主布局
+        main_layout = QVBoxLayout(floating_panel)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(4)
+        
+        # 创建标题栏
+        # title_bar = QWidget()
+        # title_bar.setStyleSheet("""
+        #     background: rgba(74, 144, 226, 0.9);
+        #     border: 1px solid rgba(255, 255, 255, 0.2);
+        #     border-radius: 4px;
+        #     padding: 4px 10px;
+        # """)
+        # title_layout = QHBoxLayout(title_bar)
+        # title_layout.setContentsMargins(4, 2, 4, 2)
+        #
+        # title_label = QLabel('机器人实时数据123')
+        # title_label.setStyleSheet("""
+        #     color: white;
+        #     font-size: 11px;
+        #     font-weight: bold;
+        # """)
+        # title_layout.addWidget(title_label)
+        # title_layout.addStretch()
+        
+        # main_layout.addWidget(title_bar)
+        
+        # 设置内容为原来的数据显示面板
+        content_panel = self.create_data_display_panel()
+        content_panel.setStyleSheet("""
+            QGroupBox {
+                font-weight: normal;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 4px;
+                margin-top: 2px;
+                margin-bottom: 2px;
+                padding-top: 4px;
+                background-color: rgba(255, 255, 255, 0.1);
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px 0 4px;
+                color: #ffffff;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QLabel {
+                color: #ffffff;
+                font-size: 9px;
+            }
+        """)
+        
+        main_layout.addWidget(content_panel)
+        
+        # 设置初始位置在3D视图的右上角
+        floating_panel.setFixedSize(500, 250)
+        floating_panel.move(20, 20)  # 距离右上角20像素
+        
+        return floating_panel
 
     def toggle_monitor_fullscreen(self):
         """改进的全屏切换功能"""
@@ -628,41 +662,40 @@ class RobotArmControlApp(QMainWindow):
             self.global_status_text.append('监控界面已还原到正常模式')
 
     def create_collapsible_group(self, widget, title, checked=False):
-        group = QGroupBox(title)
-        group.setCheckable(True)
-        group.setChecked(checked)
-        group.setLayout(QVBoxLayout())
-        group.layout().addWidget(widget)
-        # 默认收起除监控外的分组
-        if not checked:
-            widget.setVisible(False)
-        group.toggled.connect(widget.setVisible)
-        return group
+        """创建可折叠的分组（使用UI工具函数）"""
+        from app.utils.ui_utils import create_collapsible_section
+        return create_collapsible_section(widget, title, checked)
 
     def create_serial_group(self):
-        """界面层：串口配置组"""
-        serial_group = QGroupBox('串口配置')
-        serial_layout = QVBoxLayout(serial_group)
+        """界面层：串口配置组（使用UI工具函数）"""
+        from app.utils.ui_utils import create_group_box, create_button, create_input_field
+        
+        serial_group = create_group_box('串口配置', 'vertical')
+        serial_layout = serial_group.layout()
+        
         port_layout = QHBoxLayout()
-        self.port_combo = QComboBox()
-        self.refresh_ports_btn = QPushButton(qta.icon('fa5s.sync'), '')
-        self.connect_btn = QPushButton('连接')
+        self.port_combo = create_input_field('combo')
+        self.refresh_ports_btn = create_button('', 'fa5s.sync', '刷新串口列表')
+        self.connect_btn = create_button('连接', style='background-color: #4CAF50; color: white;')
+        
         port_layout.addWidget(self.port_combo)
         port_layout.addWidget(self.refresh_ports_btn)
         port_layout.addWidget(self.connect_btn)
         serial_layout.addLayout(port_layout)
+        
         return serial_group
     
     def create_communication_group(self):
-        """界面层：通信配置组"""
-        comm_group = QGroupBox('通信配置')
-        comm_layout = QVBoxLayout(comm_group)
+        """界面层：通信配置组（使用UI工具函数）"""
+        from app.utils.ui_utils import create_group_box, create_label, create_button, create_input_field, BUTTON_STYLE_PRIMARY, BUTTON_STYLE_DANGER
+        
+        comm_group = create_group_box('通信配置', 'vertical')
+        comm_layout = comm_group.layout()
         
         # 通信协议选择
         protocol_layout = QHBoxLayout()
-        protocol_layout.addWidget(QLabel('通信协议:'))
-        self.protocol_combo = QComboBox()
-        self.protocol_combo.addItems(['串口通信', 'TCP/IP', 'Profinet', 'ModBus TCP/IP'])
+        protocol_layout.addWidget(create_label('通信协议:', bold=True))
+        self.protocol_combo = create_input_field('combo', '串口通信', ['串口通信', 'TCP/IP', 'Profinet', 'ModBus TCP/IP'])
         self.protocol_combo.currentTextChanged.connect(self.on_protocol_changed)
         protocol_layout.addWidget(self.protocol_combo)
         protocol_layout.addStretch()
@@ -692,18 +725,17 @@ class RobotArmControlApp(QMainWindow):
         
         # 连接状态显示
         status_layout = QHBoxLayout()
-        status_layout.addWidget(QLabel('连接状态:'))
-        self.comm_status_label = QLabel('未连接')
-        self.comm_status_label.setStyleSheet('color: red; font-weight: bold;')
+        status_layout.addWidget(create_label('连接状态:', bold=True))
+        self.comm_status_label = create_label('未连接', color='red', bold=True)
         status_layout.addWidget(self.comm_status_label)
         status_layout.addStretch()
         comm_layout.addLayout(status_layout)
         
         # 连接控制按钮
         btn_layout = QHBoxLayout()
-        self.comm_connect_btn = QPushButton('连接')
-        self.comm_disconnect_btn = QPushButton('断开')
-        self.comm_test_btn = QPushButton('测试连接')
+        self.comm_connect_btn = create_button('连接', style=BUTTON_STYLE_PRIMARY)
+        self.comm_disconnect_btn = create_button('断开', style=BUTTON_STYLE_DANGER)
+        self.comm_test_btn = create_button('测试连接')
         
         self.comm_connect_btn.clicked.connect(self.on_comm_connect)
         self.comm_disconnect_btn.clicked.connect(self.on_comm_disconnect)
@@ -718,15 +750,17 @@ class RobotArmControlApp(QMainWindow):
         return comm_group
     
     def create_serial_config_widget(self):
-        """串口配置界面"""
+        """串口配置界面（使用UI工具函数）"""
+        from app.utils.ui_utils import create_label, create_button, create_input_field
+        
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
         # 串口选择
         port_layout = QHBoxLayout()
-        port_layout.addWidget(QLabel('串口:'))
-        self.serial_port_combo = QComboBox()
-        self.serial_refresh_btn = QPushButton(qta.icon('fa5s.sync'), '')
+        port_layout.addWidget(create_label('串口:', bold=True))
+        self.serial_port_combo = create_input_field('combo')
+        self.serial_refresh_btn = create_button('', 'fa5s.sync', '刷新串口列表')
         self.serial_refresh_btn.setMaximumWidth(30)
         self.serial_refresh_btn.clicked.connect(self.refresh_serial_ports)
         port_layout.addWidget(self.serial_port_combo)
@@ -736,30 +770,25 @@ class RobotArmControlApp(QMainWindow):
         
         # 波特率设置
         baud_layout = QHBoxLayout()
-        baud_layout.addWidget(QLabel('波特率:'))
-        self.serial_baud_combo = QComboBox()
-        self.serial_baud_combo.addItems(['9600', '19200', '38400', '57600', '115200', '230400', '460800', '921600'])
-        self.serial_baud_combo.setCurrentText('115200')
+        baud_layout.addWidget(create_label('波特率:', bold=True))
+        self.serial_baud_combo = create_input_field('combo', '115200', 
+                                                   ['9600', '19200', '38400', '57600', '115200', '230400', '460800', '921600'])
         baud_layout.addWidget(self.serial_baud_combo)
         baud_layout.addStretch()
         layout.addLayout(baud_layout)
         
         # 数据位、停止位、校验位
         param_layout = QHBoxLayout()
-        param_layout.addWidget(QLabel('数据位:'))
-        self.serial_data_bits = QComboBox()
-        self.serial_data_bits.addItems(['5', '6', '7', '8'])
-        self.serial_data_bits.setCurrentText('8')
+        param_layout.addWidget(create_label('数据位:', bold=True))
+        self.serial_data_bits = create_input_field('combo', '8', ['5', '6', '7', '8'])
         param_layout.addWidget(self.serial_data_bits)
         
-        param_layout.addWidget(QLabel('停止位:'))
-        self.serial_stop_bits = QComboBox()
-        self.serial_stop_bits.addItems(['1', '1.5', '2'])
+        param_layout.addWidget(create_label('停止位:', bold=True))
+        self.serial_stop_bits = create_input_field('combo', '1', ['1', '1.5', '2'])
         param_layout.addWidget(self.serial_stop_bits)
         
-        param_layout.addWidget(QLabel('校验位:'))
-        self.serial_parity = QComboBox()
-        self.serial_parity.addItems(['None', 'Even', 'Odd', 'Mark', 'Space'])
+        param_layout.addWidget(create_label('校验位:', bold=True))
+        self.serial_parity = create_input_field('combo', 'None', ['None', 'Even', 'Odd', 'Mark', 'Space'])
         param_layout.addWidget(self.serial_parity)
         param_layout.addStretch()
         layout.addLayout(param_layout)
@@ -770,15 +799,16 @@ class RobotArmControlApp(QMainWindow):
         return widget
     
     def create_tcpip_config_widget(self):
-        """TCP/IP配置界面"""
+        """TCP/IP配置界面（使用UI工具函数）"""
+        from app.utils.ui_utils import create_group_box, create_label, create_input_field
+        
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
         # 模式选择
         mode_layout = QHBoxLayout()
-        mode_layout.addWidget(QLabel('工作模式:'))
-        self.tcpip_mode_combo = QComboBox()
-        self.tcpip_mode_combo.addItems(['Client', 'Server'])
+        mode_layout.addWidget(create_label('工作模式:', bold=True))
+        self.tcpip_mode_combo = create_input_field('combo', 'Client', ['Client', 'Server'])
         self.tcpip_mode_combo.currentTextChanged.connect(self.on_tcpip_mode_changed)
         mode_layout.addWidget(self.tcpip_mode_combo)
         mode_layout.addStretch()
@@ -799,25 +829,22 @@ class RobotArmControlApp(QMainWindow):
         layout.addWidget(self.tcpip_mode_stack)
         
         # 通用设置
-        common_group = QGroupBox('通用设置')
-        common_layout = QVBoxLayout(common_group)
+        common_group = create_group_box('通用设置', 'vertical')
+        common_layout = common_group.layout()
         
         # 连接超时设置
         timeout_layout = QHBoxLayout()
-        timeout_layout.addWidget(QLabel('超时时间(秒):'))
-        self.tcpip_timeout_input = QSpinBox()
-        self.tcpip_timeout_input.setRange(1, 60)
-        self.tcpip_timeout_input.setValue(5)
+        timeout_layout.addWidget(create_label('超时时间(秒):', bold=True))
+        self.tcpip_timeout_input = create_input_field('number', 5, [1, 60])
         timeout_layout.addWidget(self.tcpip_timeout_input)
         timeout_layout.addStretch()
         common_layout.addLayout(timeout_layout)
         
         # 保持连接设置
         keepalive_layout = QHBoxLayout()
-        from PyQt5.QtWidgets import QCheckBox
-        self.tcpip_keepalive_check = QCheckBox('保持连接')
-        self.tcpip_keepalive_check.setChecked(True)
+        self.tcpip_keepalive_check = create_input_field('checkbox', True)
         keepalive_layout.addWidget(self.tcpip_keepalive_check)
+        keepalive_layout.addWidget(create_label('保持连接', bold=True))
         keepalive_layout.addStretch()
         common_layout.addLayout(keepalive_layout)
         
@@ -826,45 +853,41 @@ class RobotArmControlApp(QMainWindow):
         return widget
     
     def create_tcpip_client_widget(self):
-        """TCP/IP Client模式配置界面"""
+        """TCP/IP Client模式配置界面（使用UI工具函数）"""
+        from app.utils.ui_utils import create_label, create_input_field
+        
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
         # 目标服务器IP地址
         ip_layout = QHBoxLayout()
-        ip_layout.addWidget(QLabel('服务器IP:'))
-        self.tcpip_client_host_input = QLineEdit()
+        ip_layout.addWidget(create_label('服务器IP:', bold=True))
+        self.tcpip_client_host_input = create_input_field('text', '192.168.1.100')
         self.tcpip_client_host_input.setPlaceholderText('192.168.1.100')
-        self.tcpip_client_host_input.setText('192.168.1.100')
         ip_layout.addWidget(self.tcpip_client_host_input)
         ip_layout.addStretch()
         layout.addLayout(ip_layout)
         
         # 目标服务器端口
         port_layout = QHBoxLayout()
-        port_layout.addWidget(QLabel('服务器端口:'))
-        self.tcpip_client_port_input = QSpinBox()
-        self.tcpip_client_port_input.setRange(1, 65535)
-        self.tcpip_client_port_input.setValue(8080)
+        port_layout.addWidget(create_label('服务器端口:', bold=True))
+        self.tcpip_client_port_input = create_input_field('number', 8080, [1, 65535])
         port_layout.addWidget(self.tcpip_client_port_input)
         port_layout.addStretch()
         layout.addLayout(port_layout)
         
         # 自动重连设置
         reconnect_layout = QHBoxLayout()
-        from PyQt5.QtWidgets import QCheckBox
-        self.tcpip_client_reconnect_check = QCheckBox('自动重连')
-        self.tcpip_client_reconnect_check.setChecked(True)
+        self.tcpip_client_reconnect_check = create_input_field('checkbox', True)
         reconnect_layout.addWidget(self.tcpip_client_reconnect_check)
+        reconnect_layout.addWidget(create_label('自动重连', bold=True))
         reconnect_layout.addStretch()
         layout.addLayout(reconnect_layout)
         
         # 重连间隔
         interval_layout = QHBoxLayout()
-        interval_layout.addWidget(QLabel('重连间隔(秒):'))
-        self.tcpip_client_interval_input = QSpinBox()
-        self.tcpip_client_interval_input.setRange(1, 300)
-        self.tcpip_client_interval_input.setValue(5)
+        interval_layout.addWidget(create_label('重连间隔(秒):', bold=True))
+        self.tcpip_client_interval_input = create_input_field('number', 5, [1, 300])
         interval_layout.addWidget(self.tcpip_client_interval_input)
         interval_layout.addStretch()
         layout.addLayout(interval_layout)
@@ -872,43 +895,40 @@ class RobotArmControlApp(QMainWindow):
         return widget
     
     def create_tcpip_server_widget(self):
-        """TCP/IP Server模式配置界面"""
+        """TCP/IP Server模式配置界面（使用UI工具函数）"""
+        from app.utils.ui_utils import create_label, create_input_field
+        
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
         # 监听端口
         port_layout = QHBoxLayout()
-        port_layout.addWidget(QLabel('监听端口:'))
-        self.tcpip_server_port_input = QSpinBox()
-        self.tcpip_server_port_input.setRange(1, 65535)
-        self.tcpip_server_port_input.setValue(8080)
+        port_layout.addWidget(create_label('监听端口:', bold=True))
+        self.tcpip_server_port_input = create_input_field('number', 8080, [1, 65535])
         port_layout.addWidget(self.tcpip_server_port_input)
         port_layout.addStretch()
         layout.addLayout(port_layout)
         
         # 监听地址
         bind_layout = QHBoxLayout()
-        bind_layout.addWidget(QLabel('绑定地址:'))
-        self.tcpip_server_bind_input = QLineEdit()
+        bind_layout.addWidget(create_label('绑定地址:', bold=True))
+        self.tcpip_server_bind_input = create_input_field('text', '0.0.0.0')
         self.tcpip_server_bind_input.setPlaceholderText('0.0.0.0 (所有接口)')
-        self.tcpip_server_bind_input.setText('0.0.0.0')
         bind_layout.addWidget(self.tcpip_server_bind_input)
         bind_layout.addStretch()
         layout.addLayout(bind_layout)
         
         # 最大连接数
         max_conn_layout = QHBoxLayout()
-        max_conn_layout.addWidget(QLabel('最大连接数:'))
-        self.tcpip_server_max_conn_input = QSpinBox()
-        self.tcpip_server_max_conn_input.setRange(1, 100)
-        self.tcpip_server_max_conn_input.setValue(10)
+        max_conn_layout.addWidget(create_label('最大连接数:', bold=True))
+        self.tcpip_server_max_conn_input = create_input_field('number', 10, [1, 100])
         max_conn_layout.addWidget(self.tcpip_server_max_conn_input)
         max_conn_layout.addStretch()
         layout.addLayout(max_conn_layout)
         
         # 连接状态显示
         status_layout = QHBoxLayout()
-        status_layout.addWidget(QLabel('当前连接数:'))
+        status_layout.addWidget(create_label('当前连接数:', bold=True))
         self.tcpip_server_conn_count_label = QLabel('0')
         self.tcpip_server_conn_count_label.setStyleSheet('font-weight: bold; color: blue;')
         status_layout.addWidget(self.tcpip_server_conn_count_label)
@@ -934,56 +954,52 @@ class RobotArmControlApp(QMainWindow):
                 self.tcpip_server_conn_count_label.setStyleSheet('font-weight: bold; color: blue;')
     
     def create_profinet_config_widget(self):
-        """Profinet配置界面"""
+        """Profinet配置界面（使用UI工具函数）"""
+        from app.utils.ui_utils import create_label, create_input_field
+        
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
         # 设备名称
         name_layout = QHBoxLayout()
-        name_layout.addWidget(QLabel('设备名称:'))
-        self.profinet_device_name = QLineEdit()
+        name_layout.addWidget(create_label('设备名称:', bold=True))
+        self.profinet_device_name = create_input_field('text', 'robot-controller')
         self.profinet_device_name.setPlaceholderText('robot-controller')
-        self.profinet_device_name.setText('robot-controller')
         name_layout.addWidget(self.profinet_device_name)
         name_layout.addStretch()
         layout.addLayout(name_layout)
         
         # IP地址设置
         ip_layout = QHBoxLayout()
-        ip_layout.addWidget(QLabel('IP地址:'))
-        self.profinet_ip_input = QLineEdit()
+        ip_layout.addWidget(create_label('IP地址:', bold=True))
+        self.profinet_ip_input = create_input_field('text', '192.168.1.50')
         self.profinet_ip_input.setPlaceholderText('192.168.1.50')
-        self.profinet_ip_input.setText('192.168.1.50')
         ip_layout.addWidget(self.profinet_ip_input)
         ip_layout.addStretch()
         layout.addLayout(ip_layout)
         
         # 子网掩码
         mask_layout = QHBoxLayout()
-        mask_layout.addWidget(QLabel('子网掩码:'))
-        self.profinet_mask_input = QLineEdit()
+        mask_layout.addWidget(create_label('子网掩码:', bold=True))
+        self.profinet_mask_input = create_input_field('text', '255.255.255.0')
         self.profinet_mask_input.setPlaceholderText('255.255.255.0')
-        self.profinet_mask_input.setText('255.255.255.0')
         mask_layout.addWidget(self.profinet_mask_input)
         mask_layout.addStretch()
         layout.addLayout(mask_layout)
         
         # 网关地址
         gateway_layout = QHBoxLayout()
-        gateway_layout.addWidget(QLabel('网关地址:'))
-        self.profinet_gateway_input = QLineEdit()
+        gateway_layout.addWidget(create_label('网关地址:', bold=True))
+        self.profinet_gateway_input = create_input_field('text', '192.168.1.1')
         self.profinet_gateway_input.setPlaceholderText('192.168.1.1')
-        self.profinet_gateway_input.setText('192.168.1.1')
         gateway_layout.addWidget(self.profinet_gateway_input)
         gateway_layout.addStretch()
         layout.addLayout(gateway_layout)
         
         # 站号设置
         station_layout = QHBoxLayout()
-        station_layout.addWidget(QLabel('站号:'))
-        self.profinet_station_input = QSpinBox()
-        self.profinet_station_input.setRange(1, 255)
-        self.profinet_station_input.setValue(1)
+        station_layout.addWidget(create_label('站号:', bold=True))
+        self.profinet_station_input = create_input_field('number', 1, [1, 255])
         station_layout.addWidget(self.profinet_station_input)
         station_layout.addStretch()
         layout.addLayout(station_layout)
@@ -991,14 +1007,15 @@ class RobotArmControlApp(QMainWindow):
         return widget
     
     def create_modbus_config_widget(self):
-        """ModBus TCP/IP配置界面"""
+        """ModBus TCP/IP配置界面（使用UI工具函数）"""
+        from app.utils.ui_utils import create_label, create_input_field
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
         # IP地址设置
         ip_layout = QHBoxLayout()
-        ip_layout.addWidget(QLabel('IP地址:'))
-        self.modbus_host_input = QLineEdit()
+        ip_layout.addWidget(create_label('IP地址:', bold=True))
+        self.modbus_host_input = create_input_field('text', '192.168.1.200')
         self.modbus_host_input.setPlaceholderText('192.168.1.200')
         self.modbus_host_input.setText('192.168.1.200')
         ip_layout.addWidget(self.modbus_host_input)
@@ -1007,40 +1024,32 @@ class RobotArmControlApp(QMainWindow):
         
         # 端口设置
         port_layout = QHBoxLayout()
-        port_layout.addWidget(QLabel('端口:'))
-        self.modbus_port_input = QSpinBox()
-        self.modbus_port_input.setRange(1, 65535)
-        self.modbus_port_input.setValue(502)  # ModBus TCP默认端口
+        port_layout.addWidget(create_label('端口:', bold=True))
+        self.modbus_port_input = create_input_field('number', 502, [1, 65535])
         port_layout.addWidget(self.modbus_port_input)
         port_layout.addStretch()
         layout.addLayout(port_layout)
         
         # 从站地址
         slave_layout = QHBoxLayout()
-        slave_layout.addWidget(QLabel('从站地址:'))
-        self.modbus_slave_input = QSpinBox()
-        self.modbus_slave_input.setRange(1, 255)
-        self.modbus_slave_input.setValue(1)
+        slave_layout.addWidget(create_label('从站地址:', bold=True))
+        self.modbus_slave_input = create_input_field('number', 1, [1, 255])
         slave_layout.addWidget(self.modbus_slave_input)
         slave_layout.addStretch()
         layout.addLayout(slave_layout)
         
         # 超时设置
         timeout_layout = QHBoxLayout()
-        timeout_layout.addWidget(QLabel('超时时间(秒):'))
-        self.modbus_timeout_input = QSpinBox()
-        self.modbus_timeout_input.setRange(1, 60)
-        self.modbus_timeout_input.setValue(3)
+        timeout_layout.addWidget(create_label('超时时间(秒):', bold=True))
+        self.modbus_timeout_input = create_input_field('number', 3, [1, 60])
         timeout_layout.addWidget(self.modbus_timeout_input)
         timeout_layout.addStretch()
         layout.addLayout(timeout_layout)
         
         # 重试次数
         retry_layout = QHBoxLayout()
-        retry_layout.addWidget(QLabel('重试次数:'))
-        self.modbus_retry_input = QSpinBox()
-        self.modbus_retry_input.setRange(0, 10)
-        self.modbus_retry_input.setValue(3)
+        retry_layout.addWidget(create_label('重试次数:', bold=True))
+        self.modbus_retry_input = create_input_field('number', 3, [0, 10])
         retry_layout.addWidget(self.modbus_retry_input)
         retry_layout.addStretch()
         layout.addLayout(retry_layout)
@@ -1489,12 +1498,12 @@ class RobotArmControlApp(QMainWindow):
             return
         import time
         
-        # 更新关节数据表格 - 将弧度转换为度数显示
-        if hasattr(self, 'joints_table'):
+        # 更新关节数据标签 - 将弧度转换为度数显示
+        if hasattr(self, 'joint_labels'):
             for i, angle in enumerate(joint_angles):
                 if i < 7:  # A1-A7
                     angle_deg = angle * 180 / np.pi
-                    self.joints_table.setItem(i, 1, QTableWidgetItem(f'{angle_deg:.2f}'))
+                    self.joint_labels[f'A{i+1}_pos'].setText(f'{angle_deg:.2f}°')
         
         t = time.time()
         self.time_history.append(t)
@@ -1536,12 +1545,13 @@ class RobotArmControlApp(QMainWindow):
         if not hasattr(self, 'ee_curve') or self.ee_curve is None:
             return
         
-        # 更新TCP位置和姿态表格（合并表格）
-        if hasattr(self, 'tcp_table') and len(tcp_pose) >= 3:
+        # 更新TCP位置和姿态标签
+        if hasattr(self, 'tcp_labels') and len(tcp_pose) >= 3:
             # 更新位置数据 (X, Y, Z)
             for i in range(3):
                 if i < len(tcp_pose):
-                    self.tcp_table.setItem(i, 1, QTableWidgetItem(f'{tcp_pose[i]:.4f}'))
+                    param = ['X', 'Y', 'Z'][i]
+                    self.tcp_labels[param].setText(f'{tcp_pose[i]:.4f} m')
             
             # 更新姿态数据（四元数转欧拉角）
             if len(tcp_pose) >= 7:  # 完整的TCP姿态数据 [x, y, z, qw, qx, qy, qz]
@@ -1551,11 +1561,12 @@ class RobotArmControlApp(QMainWindow):
                 # 转换为欧拉角（弧度）
                 roll, pitch, yaw = quaternion_to_euler(qw, qx, qy, qz)
                 
-                # 转换为度数并更新表格
+                # 转换为度数并更新标签
                 euler_angles = [roll, pitch, yaw]
                 for i, angle_rad in enumerate(euler_angles):
                     angle_deg = angle_rad * 180 / math.pi
-                    self.tcp_table.setItem(i + 3, 1, QTableWidgetItem(f'{angle_deg:.2f}'))
+                    param = ['Rx', 'Ry', 'Rz'][i]
+                    self.tcp_labels[param].setText(f'{angle_deg:.2f}°')
         
         # 末端轨迹（只画X-Y）
         if len(tcp_pose) >= 2:
@@ -1613,11 +1624,11 @@ class RobotArmControlApp(QMainWindow):
     
     def update_monitor_torque(self, torques):
         """更新关节力矩显示"""
-        # 更新关节数据表格中的扭矩列
-        if hasattr(self, 'joints_table'):
+        # 更新关节数据标签中的扭矩列
+        if hasattr(self, 'joint_labels'):
             for i, torque in enumerate(torques):
                 if i < 7:  # A1-A7
-                    self.joints_table.setItem(i, 2, QTableWidgetItem(f'{torque:.3f}'))
+                    self.joint_labels[f'A{i+1}_torque'].setText(f'{torque:.3f} Nm')
         
         # 更新力矩历史数据
         for i, torque in enumerate(torques):
@@ -1647,17 +1658,19 @@ class RobotArmControlApp(QMainWindow):
             import time
             t = time.time()
             
-            # 更新TCP力/力矩表格（合并表格）
-            if hasattr(self, 'ft_table'):
+            # 更新TCP力/力矩标签
+            if hasattr(self, 'ft_labels'):
                 # 更新力数据 (Fx, Fy, Fz)
                 for i in range(3):
                     if i < len(ft_data):
-                        self.ft_table.setItem(i, 1, QTableWidgetItem(f'{ft_data[i]:.3f}'))
+                        param = ['Fx', 'Fy', 'Fz'][i]
+                        self.ft_labels[param].setText(f'{ft_data[i]:.3f} N')
                 
                 # 更新力矩数据 (Mx, My, Mz)
                 for i in range(3):
                     if i + 3 < len(ft_data):
-                        self.ft_table.setItem(i + 3, 1, QTableWidgetItem(f'{ft_data[i + 3]:.3f}'))
+                        param = ['Mx', 'My', 'Mz'][i]
+                        self.ft_labels[param].setText(f'{ft_data[i + 3]:.3f} Nm')
             
             # 确保时间历史数据与力/力矩数据同步
             if not hasattr(self, 'time_history'):
@@ -3061,7 +3074,10 @@ def main():
         window.show()
         sys.exit(app.exec_())
     except Exception as e:
+        import traceback
         print(f"应用程序发生错误: {str(e)}")
+        print("完整错误堆栈:")
+        traceback.print_exc()
     finally:
         if ROS_AVAILABLE and not rospy.is_shutdown():
             rospy.signal_shutdown('Application closed')

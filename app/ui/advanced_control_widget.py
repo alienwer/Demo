@@ -98,7 +98,8 @@ class AdvancedControlWidget(QWidget):
         self.create_device_tab()
         
         # 状态栏
-        self.status_label = QLabel("高级控制面板已就绪")
+        from app.utils.ui_utils import create_label
+        self.status_label = create_label("高级控制面板已就绪", color="#333333", font_size=12)
         self.status_label.setStyleSheet("QLabel { padding: 5px; background-color: #f0f0f0; }")
         layout.addWidget(self.status_label)
     
@@ -112,9 +113,9 @@ class AdvancedControlWidget(QWidget):
         primitive_layout = QGridLayout(primitive_group)
         
         # 原语类别选择
-        primitive_layout.addWidget(QLabel("原语类别:"), 0, 0)
-        self.primitive_category_combo = QComboBox()
-        self.primitive_category_combo.addItems([
+        from app.utils.ui_utils import create_label, create_input_field
+        primitive_layout.addWidget(create_label("原语类别:"), 0, 0)
+        self.primitive_category_combo = create_input_field("combo", options=[
             "运动控制", "工作流", "基础力控制", "高级力控制",
             "自适应装配", "表面处理", "柔性搬运", "自适应抓取",
             "零重力浮动", "康复理疗", "视觉伺服", "展示应用"
@@ -122,8 +123,8 @@ class AdvancedControlWidget(QWidget):
         primitive_layout.addWidget(self.primitive_category_combo, 0, 1)
         
         # 原语选择
-        primitive_layout.addWidget(QLabel("原语名称:"), 1, 0)
-        self.primitive_name_combo = QComboBox()
+        primitive_layout.addWidget(create_label("原语名称:"), 1, 0)
+        self.primitive_name_combo = create_input_field("combo")
         primitive_layout.addWidget(self.primitive_name_combo, 1, 1)
         
         # 参数配置区域
@@ -131,16 +132,17 @@ class AdvancedControlWidget(QWidget):
         self.primitive_params_layout = QVBoxLayout(self.primitive_params_widget)
         
         # 执行控制
+        from app.utils.ui_utils import create_button, BUTTON_STYLE_PRIMARY, BUTTON_STYLE_DANGER
         control_layout = QHBoxLayout()
-        self.execute_primitive_btn = QPushButton("执行原语")
-        self.stop_primitive_btn = QPushButton("停止原语")
+        self.execute_primitive_btn = create_button("执行原语", style=BUTTON_STYLE_PRIMARY)
+        self.stop_primitive_btn = create_button("停止原语", style=BUTTON_STYLE_DANGER)
         self.stop_primitive_btn.setEnabled(False)
         control_layout.addWidget(self.execute_primitive_btn)
         control_layout.addWidget(self.stop_primitive_btn)
         control_layout.addStretch()
         
         # 状态显示
-        self.primitive_status_label = QLabel("状态: 就绪")
+        self.primitive_status_label = create_label("状态: 就绪", color="#333333")
         self.primitive_progress_bar = QProgressBar()
         
         layout.addWidget(primitive_group)
@@ -155,6 +157,8 @@ class AdvancedControlWidget(QWidget):
     
     def create_safety_tab(self):
         """创建Safety安全管理标签页"""
+        from app.utils.ui_utils import create_label, create_input_field, create_button, BUTTON_STYLE_PRIMARY, BUTTON_STYLE_SECONDARY, BUTTON_STYLE_DANGER
+        
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
@@ -173,9 +177,8 @@ class AdvancedControlWidget(QWidget):
         ]
         
         for i, (name, key) in enumerate(safety_items):
-            status_layout.addWidget(QLabel(f"{name}:"), i, 0)
-            label = QLabel("正常")
-            label.setStyleSheet("QLabel { color: green; font-weight: bold; }")
+            status_layout.addWidget(create_label(f"{name}:"), i, 0)
+            label = create_label("正常", color="green", bold=True)
             self.safety_status_labels[key] = label
             status_layout.addWidget(label, i, 1)
         
@@ -184,27 +187,22 @@ class AdvancedControlWidget(QWidget):
         config_layout = QGridLayout(safety_config_group)
         
         # 碰撞检测阈值
-        config_layout.addWidget(QLabel("碰撞检测阈值:"), 0, 0)
-        self.collision_threshold_spin = QDoubleSpinBox()
-        self.collision_threshold_spin.setRange(0.1, 10.0)
-        self.collision_threshold_spin.setValue(2.0)
+        config_layout.addWidget(create_label("碰撞检测阈值:"), 0, 0)
+        self.collision_threshold_spin = create_input_field("float", default_value=2.0, range_values=[0.1, 10.0])
         self.collision_threshold_spin.setSuffix(" N")
         config_layout.addWidget(self.collision_threshold_spin, 0, 1)
         
         # 速度限制
-        config_layout.addWidget(QLabel("最大速度:"), 1, 0)
-        self.max_velocity_spin = QDoubleSpinBox()
-        self.max_velocity_spin.setRange(0.1, 5.0)
-        self.max_velocity_spin.setValue(1.0)
+        config_layout.addWidget(create_label("最大速度:"), 1, 0)
+        self.max_velocity_spin = create_input_field("float", default_value=1.0, range_values=[0.1, 5.0])
         self.max_velocity_spin.setSuffix(" m/s")
         config_layout.addWidget(self.max_velocity_spin, 1, 1)
         
         # 控制按钮
         control_layout = QHBoxLayout()
-        self.enable_safety_btn = QPushButton("启用安全系统")
-        self.disable_safety_btn = QPushButton("禁用安全系统")
-        self.emergency_stop_btn = QPushButton("紧急停止")
-        self.emergency_stop_btn.setStyleSheet("QPushButton { background-color: red; color: white; font-weight: bold; }")
+        self.enable_safety_btn = create_button("启用安全系统", style=BUTTON_STYLE_PRIMARY)
+        self.disable_safety_btn = create_button("禁用安全系统", style=BUTTON_STYLE_SECONDARY)
+        self.emergency_stop_btn = create_button("紧急停止", style=BUTTON_STYLE_DANGER)
         
         control_layout.addWidget(self.enable_safety_btn)
         control_layout.addWidget(self.disable_safety_btn)
@@ -220,6 +218,8 @@ class AdvancedControlWidget(QWidget):
     
     def create_scheduler_tab(self):
         """创建Scheduler任务调度标签页"""
+        from app.utils.ui_utils import create_label, create_input_field, create_button, BUTTON_STYLE_PRIMARY, BUTTON_STYLE_SECONDARY, BUTTON_STYLE_DANGER
+        
         tab = QWidget()
         layout = QHBoxLayout(tab)
         
@@ -228,16 +228,16 @@ class AdvancedControlWidget(QWidget):
         left_layout = QVBoxLayout(left_widget)
         
         # 任务列表
-        left_layout.addWidget(QLabel("任务队列:"))
+        left_layout.addWidget(create_label("任务队列:"))
         self.task_list_widget = QListWidget()
         left_layout.addWidget(self.task_list_widget)
         
         # 任务控制按钮
         task_control_layout = QHBoxLayout()
-        self.add_task_btn = QPushButton("添加任务")
-        self.remove_task_btn = QPushButton("删除任务")
-        self.start_scheduler_btn = QPushButton("开始调度")
-        self.stop_scheduler_btn = QPushButton("停止调度")
+        self.add_task_btn = create_button("添加任务", style=BUTTON_STYLE_PRIMARY)
+        self.remove_task_btn = create_button("删除任务", style=BUTTON_STYLE_SECONDARY)
+        self.start_scheduler_btn = create_button("开始调度", style=BUTTON_STYLE_PRIMARY)
+        self.stop_scheduler_btn = create_button("停止调度", style=BUTTON_STYLE_DANGER)
         
         task_control_layout.addWidget(self.add_task_btn)
         task_control_layout.addWidget(self.remove_task_btn)
@@ -254,22 +254,19 @@ class AdvancedControlWidget(QWidget):
         task_details_group = QGroupBox("任务详情")
         details_layout = QGridLayout(task_details_group)
         
-        details_layout.addWidget(QLabel("任务名称:"), 0, 0)
-        self.task_name_edit = QLineEdit()
+        details_layout.addWidget(create_label("任务名称:"), 0, 0)
+        self.task_name_edit = create_input_field("text")
         details_layout.addWidget(self.task_name_edit, 0, 1)
         
-        details_layout.addWidget(QLabel("任务类型:"), 1, 0)
-        self.task_type_combo = QComboBox()
-        self.task_type_combo.addItems(["原语执行", "运动控制", "数据采集", "文件传输"])
+        details_layout.addWidget(create_label("任务类型:"), 1, 0)
+        self.task_type_combo = create_input_field("combo", options=["原语执行", "运动控制", "数据采集", "文件传输"])
         details_layout.addWidget(self.task_type_combo, 1, 1)
         
-        details_layout.addWidget(QLabel("优先级:"), 2, 0)
-        self.task_priority_spin = QSpinBox()
-        self.task_priority_spin.setRange(1, 10)
-        self.task_priority_spin.setValue(5)
+        details_layout.addWidget(create_label("优先级:"), 2, 0)
+        self.task_priority_spin = create_input_field("int", default_value=5, range_values=[1, 10])
         details_layout.addWidget(self.task_priority_spin, 2, 1)
         
-        details_layout.addWidget(QLabel("任务参数:"), 3, 0)
+        details_layout.addWidget(create_label("任务参数:"), 3, 0)
         self.task_params_edit = QTextEdit()
         self.task_params_edit.setMaximumHeight(100)
         details_layout.addWidget(self.task_params_edit, 3, 1)
@@ -306,6 +303,8 @@ class AdvancedControlWidget(QWidget):
     
     def create_workcoord_tab(self):
         """创建WorkCoord工作坐标标签页"""
+        from app.utils.ui_utils import create_label, create_input_field, create_button, BUTTON_STYLE_PRIMARY, BUTTON_STYLE_SECONDARY, BUTTON_STYLE_DANGER
+        
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
@@ -319,11 +318,11 @@ class AdvancedControlWidget(QWidget):
         
         # 坐标系操作按钮
         coord_control_layout = QHBoxLayout()
-        self.add_coord_btn = QPushButton("添加坐标系")
-        self.edit_coord_btn = QPushButton("编辑坐标系")
-        self.delete_coord_btn = QPushButton("删除坐标系")
-        self.calibrate_coord_btn = QPushButton("标定坐标系")
-        self.switch_coord_btn = QPushButton("切换坐标系")
+        self.add_coord_btn = create_button("添加坐标系", style=BUTTON_STYLE_PRIMARY)
+        self.edit_coord_btn = create_button("编辑坐标系", style=BUTTON_STYLE_SECONDARY)
+        self.delete_coord_btn = create_button("删除坐标系", style=BUTTON_STYLE_DANGER)
+        self.calibrate_coord_btn = create_button("标定坐标系", style=BUTTON_STYLE_PRIMARY)
+        self.switch_coord_btn = create_button("切换坐标系", style=BUTTON_STYLE_SECONDARY)
         
         coord_control_layout.addWidget(self.add_coord_btn)
         coord_control_layout.addWidget(self.edit_coord_btn)
@@ -369,6 +368,8 @@ class AdvancedControlWidget(QWidget):
     
     def create_maintenance_tab(self):
         """创建Maintenance维护管理标签页"""
+        from app.utils.ui_utils import create_label, create_input_field, create_button, BUTTON_STYLE_PRIMARY, BUTTON_STYLE_SECONDARY, BUTTON_STYLE_DANGER
+        
         tab = QWidget()
         layout = QVBoxLayout(tab)
         
@@ -398,25 +399,23 @@ class AdvancedControlWidget(QWidget):
         ops_layout = QGridLayout(maintenance_ops_group)
         
         # 诊断测试
-        ops_layout.addWidget(QLabel("诊断测试:"), 0, 0)
-        self.diagnostic_combo = QComboBox()
-        self.diagnostic_combo.addItems(["系统自检", "关节测试", "传感器测试", "通信测试"])
+        ops_layout.addWidget(create_label("诊断测试:"), 0, 0)
+        self.diagnostic_combo = create_input_field("combo", options=["系统自检", "关节测试", "传感器测试", "通信测试"])
         ops_layout.addWidget(self.diagnostic_combo, 0, 1)
-        self.run_diagnostic_btn = QPushButton("运行诊断")
+        self.run_diagnostic_btn = create_button("运行诊断", style=BUTTON_STYLE_PRIMARY)
         ops_layout.addWidget(self.run_diagnostic_btn, 0, 2)
         
         # 校准操作
-        ops_layout.addWidget(QLabel("校准操作:"), 1, 0)
-        self.calibration_combo = QComboBox()
-        self.calibration_combo.addItems(["关节校准", "工具校准", "力传感器校准", "视觉校准"])
+        ops_layout.addWidget(create_label("校准操作:"), 1, 0)
+        self.calibration_combo = create_input_field("combo", options=["关节校准", "工具校准", "力传感器校准", "视觉校准"])
         ops_layout.addWidget(self.calibration_combo, 1, 1)
-        self.run_calibration_btn = QPushButton("开始校准")
+        self.run_calibration_btn = create_button("开始校准", style=BUTTON_STYLE_PRIMARY)
         ops_layout.addWidget(self.run_calibration_btn, 1, 2)
         
         # 系统备份
-        ops_layout.addWidget(QLabel("系统备份:"), 2, 0)
-        self.backup_system_btn = QPushButton("创建备份")
-        self.restore_system_btn = QPushButton("恢复备份")
+        ops_layout.addWidget(create_label("系统备份:"), 2, 0)
+        self.backup_system_btn = create_button("创建备份", style=BUTTON_STYLE_PRIMARY)
+        self.restore_system_btn = create_button("恢复备份", style=BUTTON_STYLE_SECONDARY)
         backup_layout = QHBoxLayout()
         backup_layout.addWidget(self.backup_system_btn)
         backup_layout.addWidget(self.restore_system_btn)

@@ -15,6 +15,11 @@ import time
 import subprocess
 import socket
 
+# 导入信号管理器、线程管理器和资源管理器
+from ..core.signal_manager import SignalManager, SignalType
+from ..core.thread_manager import get_thread_manager, Task, TaskPriority
+from ..core.resource_manager import get_resource_manager, ResourceType, AccessMode
+
 try:
     from flexivrdk import Robot, Model, Mode, Tool
     FLEXIV_AVAILABLE = True
@@ -55,6 +60,19 @@ class RobotControl(QObject, threading.Thread):
         self.daemon = True
         # 线程锁，防止多线程并发访问Robot对象导致mutex错误
         self.robot_lock = threading.RLock()
+        # 初始化线程管理器和资源管理器
+        self.thread_manager = get_thread_manager()
+        self.resource_manager = get_resource_manager()
+        
+        # 注册机器人资源
+        self.resource_manager.register_resource(
+            resource_id=f"robot_{self.robot_id}",
+            resource_type=ResourceType.ROBOT,
+            metadata={
+                "robot_id": self.robot_id,
+                "hardware": self.hardware
+            }
+        )
         # 初始化Model和Tool实例（仅在硬件模式下）
         self.model = None
         self.tool = None
@@ -86,6 +104,9 @@ class RobotControl(QObject, threading.Thread):
         ]
         self.teaching_points: List[List[float]] = []
         self.sim_end_effector = [0.0, 0.0, 0.0]
+        
+        # 初始化信号管理器
+        self.signal_manager = SignalManager()
 
     def set_joint_angle(self, joint_id: int, angle: float) -> bool:
         if not (0 <= joint_id < 7):
@@ -214,6 +235,8 @@ class RobotControl(QObject, threading.Thread):
                                 from flexivrdk import Robot
                                 self.robot = Robot(self.robot_id)
                                 self.status_updated.emit(f"已连接到机器人: {self.robot_id}")
+                                # 发送连接信号
+                                self.signal_manager.emit(SignalType.ROBOT_CONNECTED, {"robot_id": self.robot_id})
                         break
                     except Exception as e:
                         if attempt < max_retries - 1:
@@ -335,6 +358,8 @@ class RobotControl(QObject, threading.Thread):
                             # 检查连接状态
                             if not self.robot.connected():
                                 self.status_updated.emit("机器人连接断开")
+                                # 发送断开连接信号
+                                self.signal_manager.emit(SignalType.ROBOT_DISCONNECTED, {"robot_id": self.robot_id})
                                 break
                             
                             # 获取机器人状态数据
@@ -345,6 +370,8 @@ class RobotControl(QObject, threading.Thread):
                                 self.status_updated.emit("机器人故障状态")
                                 # 注意：不要自动清除故障，应该由用户手动处理
                                 # self.robot.ClearFault()
+                                # 发送系统错误信号
+                                self.signal_manager.emit(SignalType.SYSTEM_ERROR, {"error": "机器人故障状态"})
                             elif self.robot.operational():
                                 pass  # 正常运行，不频繁更新状态信息
                             else:
@@ -362,6 +389,8 @@ class RobotControl(QObject, threading.Thread):
                         joint_angles = list(robot_states.q)
                         self.joint_angles = joint_angles
                         self.joint_updated.emit(joint_angles)
+                        # 发送关节状态变化信号
+                        self.signal_manager.emit(SignalType.ROBOT_STATE_CHANGED, {"joint_angles": joint_angles})
                         
                         # 关节速度 (弧度/秒)
                         joint_velocities = list(robot_states.dq)
@@ -386,6 +415,8 @@ class RobotControl(QObject, threading.Thread):
                         
                     except Exception as e:
                         logging.warning(f"获取机器人状态时出错: {e}")
+                        # 发送系统错误信号
+                        self.signal_manager.emit(SignalType.SYSTEM_ERROR, {"error": str(e)})
                         # 继续运行，不因单次状态获取失败而退出
                     
                     # 控制循环频率 (约50Hz，避免过于频繁)
@@ -394,26 +425,68 @@ class RobotControl(QObject, threading.Thread):
             except Exception as e:
                 logging.error(f"机器人控制错误: {e}")
                 self.status_updated.emit(f"错误: {str(e)}")
+                # 发送系统错误信号
+                self.signal_manager.emit(SignalType.SYSTEM_ERROR, {"error": str(e)})
             finally:
                 self.stop_robot()
         else:
             # 仿真/教学模式主循环
             self.running = True
-            self.status_updated.emit("仿真/教学模式运行中")
             while self.running:
-                # 可扩展：自动演示、轨迹回放等
-                self.joint_updated.emit(self.joint_angles.copy())
-                self.end_effector_updated.emit(self.sim_end_effector.copy())
-                threading.Event().wait(0.05)  # 20Hz
-            self.status_updated.emit("仿真/教学模式已停止")
+                try:
+                    # 发送关节状态变化信号
+                    self.signal_manager.emit(SignalType.ROBOT_STATE_CHANGED, {"joint_angles": self.joint_angles})
+                    time.sleep(0.02)  # 50Hz更新频率
+                except Exception as e:
+                    logging.warning(f"仿真模式更新时出错: {e}")
+                    # 发送系统错误信号
+                    self.signal_manager.emit(SignalType.SYSTEM_ERROR, {"error": str(e)})
 
     def stop_robot(self):
+        """停止机器人控制线程"""
         self.running = False
-        # 注意：Brake()方法仅适用于医疗机器人，工业机器人不支持此功能
-        # if self.hardware and self.robot and self.robot.connected():
-        #     self.robot.Brake(True)  # 仅医疗机器人支持
-        self.status_updated.emit("已停止")
-    
+        if self.hardware and self.robot:
+            try:
+                with self.robot_lock:
+                    if self.robot.connected():
+                        self.robot.Stop()
+            except Exception as e:
+                logging.error(f"停止机器人时出错: {e}")
+        self.status_updated.emit("机器人控制已停止")
+
+    def on_connect_robot_sn(self):
+        """连接机器人（序列号方式）"""
+        robot_sn = self.robot_id
+        if not robot_sn:
+            self.status_updated.emit("请输入机器人序列号")
+            return
+            
+        self.status_updated.emit(f"正在连接机器人: {robot_sn}")
+        
+        try:
+            if self.hardware:
+                # 硬件模式下创建机器人实例
+                with self.robot_lock:
+                    if self.robot is None:
+                        self.robot = flexivrdk.Robot(robot_sn)
+                        self.status_updated.emit(f"已连接到机器人: {robot_sn}")
+                        # 发送连接信号
+                        self.signal_manager.emit(SignalType.ROBOT_CONNECTED, {"robot_id": robot_sn})
+                    else:
+                        self.status_updated.emit("机器人已连接")
+            else:
+                # 仿真模式
+                self.status_updated.emit(f"仿真模式：模拟连接到机器人 {robot_sn}")
+                # 发送连接信号
+                self.signal_manager.emit(SignalType.ROBOT_CONNECTED, {"robot_id": robot_sn, "mode": "simulation"})
+                
+        except Exception as e:
+            error_msg = f"连接机器人失败: {str(e)}"
+            self.status_updated.emit(error_msg)
+            # 发送系统错误信号
+            self.signal_manager.emit(SignalType.SYSTEM_ERROR, {"error": error_msg})
+            self.error_signal.emit(error_msg)
+
     def stop(self):
         """停止线程运行"""
         self.stop_robot()

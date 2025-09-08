@@ -17,6 +17,9 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 import ipaddress
 
+# 导入线程管理器
+from ..core.thread_manager import get_thread_manager
+
 try:
     from flexiv import Device
 except ImportError:
@@ -307,6 +310,9 @@ class DeviceManager(QObject):
         self.scan_thread = None
         self.monitor_lock = threading.Lock()
         self.stop_monitoring = threading.Event()
+        
+        # 初始化线程管理器
+        self.thread_manager = get_thread_manager()
         
         # 定时器
         self.discovery_timer = QTimer()

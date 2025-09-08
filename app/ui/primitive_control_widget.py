@@ -246,71 +246,31 @@ class PrimitiveParamWidget(QWidget):
             self.create_param_widget(param_name, param_info, param_name in required_params)
     
     def create_param_widget(self, param_name: str, param_info: Dict[str, Any], is_required: bool):
-        """创建参数控件"""
+        """创建参数控件（使用UI工具函数）"""
+        from app.utils.ui_utils import create_parameter_widget
+        
         param_type = param_info.get("type", "string")
         default_value = param_info.get("default")
         param_range = param_info.get("range")
         options = param_info.get("options")
         unit = param_info.get("unit", "")
         
-        # 创建标签
-        label_text = param_name
-        if is_required:
-            label_text += " *"
-        if unit:
-            label_text += f" ({unit})"
+        # 使用工具函数创建标签和控件
+        label, widget = create_parameter_widget(param_name, param_info, is_required)
         
-        label = QLabel(label_text)
-        if is_required:
-            label.setStyleSheet("font-weight: bold; color: red;")
-        
-        # 根据类型创建控件
-        widget = None
-        
+        # 特殊处理COORD和JPOS类型（需要自定义控件）
         if param_type == "COORD":
             widget = CoordInputWidget()
             if default_value:
                 widget.set_value(default_value)
-        
+            
         elif param_type == "JPOS":
             widget = JointInputWidget()
             if default_value:
                 widget.set_value(default_value)
         
-        elif param_type == "float":
-            widget = QDoubleSpinBox()
-            if param_range:
-                widget.setRange(param_range[0], param_range[1])
-            else:
-                widget.setRange(-1000000.0, 1000000.0)
-            widget.setDecimals(3)
-            widget.setSingleStep(0.001)
-            if default_value is not None:
-                widget.setValue(default_value)
-        
-        elif param_type == "int":
-            widget = QSpinBox()
-            if param_range:
-                widget.setRange(int(param_range[0]), int(param_range[1]))
-            else:
-                widget.setRange(-1000000, 1000000)
-            if default_value is not None:
-                widget.setValue(default_value)
-        
-        elif param_type == "enum":
-            widget = QComboBox()
-            if options:
-                widget.addItems(options)
-            if default_value:
-                widget.setCurrentText(str(default_value))
-        
-        elif param_type == "string":
-            widget = QLineEdit()
-            if default_value:
-                widget.setText(str(default_value))
-        
         elif param_type.startswith("VEC_"):
-            # 向量类型
+            # 向量类型（需要自定义处理）
             dim = int(param_type.split("_")[1][0])  # 提取维度
             widget = QWidget()
             layout = QHBoxLayout(widget)
@@ -331,12 +291,7 @@ class PrimitiveParamWidget(QWidget):
                 for i, val in enumerate(default_value[:dim]):
                     spins[i].setValue(val)
         
-        else:
-            # 默认为文本输入
-            widget = QLineEdit()
-            if default_value:
-                widget.setText(str(default_value))
-        
+        # 对于其他类型，使用工具函数创建的widget
         if widget:
             self.param_widgets[param_name] = widget
             self.param_layout.addRow(label, widget)

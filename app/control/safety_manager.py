@@ -13,6 +13,10 @@ from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 from dataclasses import dataclass
 from enum import Enum
 
+# 导入线程管理器和资源管理器
+from ..core.thread_manager import get_thread_manager
+from ..core.resource_manager import get_resource_manager, ResourceType, AccessMode
+
 try:
     from flexiv import Safety, SafetyStates, SafetyConfig
 except ImportError:
@@ -166,6 +170,18 @@ class SafetyManager(QObject):
         self.monitor_thread = None
         self.monitor_lock = threading.Lock()
         self.stop_monitoring = threading.Event()
+        # 初始化线程管理器和资源管理器
+        self.thread_manager = get_thread_manager()
+        self.resource_manager = get_resource_manager()
+        
+        # 注册安全系统资源
+        self.resource_manager.register_resource(
+            resource_id=f"safety_{self.robot_ip}",
+            resource_type=ResourceType.SENSOR,
+            metadata={
+                "robot_ip": self.robot_ip
+            }
+        )
         
         # 定时器
         self.status_timer = QTimer()

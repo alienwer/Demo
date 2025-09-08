@@ -2,6 +2,9 @@ from PyQt5.QtCore import QObject, pyqtSignal
 import threading
 import time
 
+# 导入线程管理器
+from ..core.thread_manager import get_thread_manager
+
 try:
     import flexivrdk
     FLEXIV_AVAILABLE = True
@@ -20,6 +23,8 @@ class GripperControl(QObject):
         self.gripper = None
         self._running = False
         self._thread = None
+        # 初始化线程管理器
+        self.thread_manager = get_thread_manager()
         if self.robot and FLEXIV_AVAILABLE:
             try:
                 self.gripper = flexivrdk.Gripper(self.robot)

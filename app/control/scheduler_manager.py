@@ -15,6 +15,10 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 from datetime import datetime, timedelta
 
+# 导入线程管理器和资源管理器
+from ..core.thread_manager import get_thread_manager
+from ..core.resource_manager import get_resource_manager, ResourceType, AccessMode
+
 try:
     from flexiv import Scheduler, SchedulerStates, TaskInfo, TaskStatus
 except ImportError:
@@ -265,6 +269,20 @@ class SchedulerManager(QObject):
         self.scheduler_thread = None
         self.scheduler_lock = threading.Lock()
         self.stop_scheduling = threading.Event()
+        
+        # 初始化线程管理器和资源管理器
+        self.thread_manager = get_thread_manager()
+        self.resource_manager = get_resource_manager()
+        
+        # 注册调度器资源
+        self.resource_manager.register_resource(
+            resource_id=f"scheduler_{self.robot_ip}",
+            resource_type=ResourceType.CUSTOM,
+            metadata={
+                "robot_ip": self.robot_ip,
+                "type": "scheduler"
+            }
+        )
         
         # 定时器
         self.status_timer = QTimer()

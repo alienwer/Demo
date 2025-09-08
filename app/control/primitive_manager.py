@@ -12,12 +12,20 @@ from typing import Dict, Any, List, Optional, Union
 from PyQt5.QtCore import QObject, pyqtSignal
 from enum import Enum
 
+# 导入信号管理器、线程管理器和资源管理器
+from ..core.signal_manager import SignalManager, SignalType
+from ..core.thread_manager import get_thread_manager, Task, TaskPriority
+from ..core.resource_manager import get_resource_manager, ResourceType, AccessMode
+
 try:
     from flexivrdk import Robot, Mode, Coord, JPos
     FLEXIV_AVAILABLE = True
 except ImportError:
     FLEXIV_AVAILABLE = False
     # 仿真模式下的替代类
+    class Robot:
+        pass
+    
     class Coord:
         def __init__(self, pos, rot, ref):
             self.pos = pos
@@ -115,7 +123,7 @@ class PrimitiveParams:
                 "target": {"type": "JPOS", "unit": "deg", "required": True, "description": "目标关节位置"},
                 "waypoints": {"type": "ARRAY_JPOS", "unit": "deg", "default": [], "description": "中间关节路径点列表"},
                 "jntVelScale": {"type": "int", "default": 20, "range": [1, 100], "description": "关节速度缩放百分比"},
-                "zoneRadius": {"type": "enum", "default": "Z50", "options": ["ZFine", "Z5", "Z10", "Z15", "Z20", "Z30", "Z40", "Z50", "Z60", "Z80", "Z100", "Z150", "Z200", "ZSpline"], "description": "路径点混合半径"},
+                "zoneRadius": {"type": "enum", "default": "Z50", "options": ["ZFine", "Z1", "Z5", "Z10", "Z15", "Z20", "Z30", "Z40", "Z50", "Z60", "Z80", "Z100", "Z150", "Z200", "ZSpline"], "description": "路径点混合半径"},
                 "targetTolerLevel": {"type": "int", "default": 1, "range": [0, 10], "description": "目标容差等级"}
             },
             "required": ["target"],
@@ -428,6 +436,12 @@ class PrimitiveManager(QObject):
         self.primitive_thread = None
         self.stop_requested = False
         self.execution_lock = threading.RLock()
+        # 初始化线程管理器和资源管理器
+        self.thread_manager = get_thread_manager()
+        self.resource_manager = get_resource_manager()
+        
+        # 初始化信号管理器
+        self.signal_manager = SignalManager()
         
     def execute_primitive(self, primitive_name: str, params: Dict[str, Any] = None) -> bool:
         """执行指定的Primitive"""
@@ -438,12 +452,23 @@ class PrimitiveManager(QObject):
         is_valid, error_msg = PrimitiveParams.validate_params(primitive_name, params)
         if not is_valid:
             self.primitive_failed.emit(primitive_name, error_msg)
+            # 发送Primitive失败信号
+            self.signal_manager.emit(SignalType.PRIMITIVE_FAILED, {
+                "primitive_name": primitive_name,
+                "error": error_msg
+            })
             return False
         
         # 检查是否有正在执行的Primitive
         with self.execution_lock:
             if self.current_primitive is not None:
-                self.primitive_failed.emit(primitive_name, "已有Primitive正在执行")
+                error_msg = "已有Primitive正在执行"
+                self.primitive_failed.emit(primitive_name, error_msg)
+                # 发送Primitive失败信号
+                self.signal_manager.emit(SignalType.PRIMITIVE_FAILED, {
+                    "primitive_name": primitive_name,
+                    "error": error_msg
+                })
                 return False
             
             self.current_primitive = primitive_name
@@ -464,6 +489,11 @@ class PrimitiveManager(QObject):
         try:
             self.primitive_started.emit(primitive_name)
             self.status_updated.emit(f"开始执行Primitive: {primitive_name}")
+            # 发送Primitive开始信号
+            self.signal_manager.emit(SignalType.PRIMITIVE_STARTED, {
+                "primitive_name": primitive_name,
+                "params": params
+            })
             
             if self.hardware and self.robot is not None:
                 self._execute_hardware_primitive(primitive_name, params)
@@ -473,10 +503,19 @@ class PrimitiveManager(QObject):
             if not self.stop_requested:
                 self.primitive_completed.emit(primitive_name, {})
                 self.status_updated.emit(f"Primitive执行完成: {primitive_name}")
+                # 发送Primitive完成信号
+                self.signal_manager.emit(SignalType.PRIMITIVE_COMPLETED, {
+                    "primitive_name": primitive_name
+                })
             
         except Exception as e:
             self.primitive_failed.emit(primitive_name, str(e))
             self.status_updated.emit(f"Primitive执行失败: {primitive_name} - {str(e)}")
+            # 发送Primitive失败信号
+            self.signal_manager.emit(SignalType.PRIMITIVE_FAILED, {
+                "primitive_name": primitive_name,
+                "error": str(e)
+            })
         
         finally:
             with self.execution_lock:
@@ -545,6 +584,11 @@ class PrimitiveManager(QObject):
                 "timePeriod": (i + 1) * simulation_time / steps
             }
             self.primitive_progress.emit(primitive_name, state)
+            # 发送Primitive进度信号
+            self.signal_manager.emit(SignalType.PRIMITIVE_PROGRESS, {
+                "primitive_name": primitive_name,
+                "state": state
+            })
         
         # 确保仿真完成后有短暂延迟，让信号处理完成
         time.sleep(0.1)
@@ -571,6 +615,11 @@ class PrimitiveManager(QObject):
                     "timeout": timeout
                 }
                 self.primitive_progress.emit(primitive_name, progress_info)
+                # 发送Primitive进度信号
+                self.signal_manager.emit(SignalType.PRIMITIVE_PROGRESS, {
+                    "primitive_name": primitive_name,
+                    "state": progress_info
+                })
             except Exception as e:
                 # 如果获取状态失败，仍然继续监控
                 pass
@@ -647,6 +696,10 @@ class PrimitiveManager(QObject):
                     pass
             
             self.status_updated.emit(f"已请求停止Primitive: {self.current_primitive}")
+            # 发送Primitive停止信号
+            self.signal_manager.emit(SignalType.MOTION_STOPPED, {
+                "primitive_name": self.current_primitive
+            })
             return True
     
     def get_current_primitive(self) -> Optional[str]:

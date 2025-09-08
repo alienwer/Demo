@@ -368,6 +368,20 @@ class FileIOManager(QObject):
         self.monitor_lock = threading.Lock()
         self.stop_monitoring = threading.Event()
         
+        # 初始化线程管理器和资源管理器
+        self.thread_manager = get_thread_manager()
+        self.resource_manager = get_resource_manager()
+        
+        # 注册文件传输资源
+        self.resource_manager.register_resource(
+            resource_id=f"fileio_{self.robot_ip}",
+            resource_type=ResourceType.FILE,
+            metadata={
+                "robot_ip": self.robot_ip,
+                "type": "fileio"
+            }
+        )
+        
         # 定时器
         self.sync_timer = QTimer()
         self.sync_timer.timeout.connect(self.check_auto_sync)

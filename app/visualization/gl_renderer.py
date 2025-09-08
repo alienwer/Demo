@@ -80,6 +80,9 @@ class GLRenderer(QGLWidget, QObject):
     def resizeGL(self, w, h):
         if not self._gl_initialized:
             return
+        # 防止除零错误和无效尺寸
+        if w <= 0 or h <= 0:
+            return
         glViewport(0, 0, w, h)
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
@@ -117,10 +120,11 @@ class GLRenderer(QGLWidget, QObject):
         glBegin(GL_LINES)
         for i in range(-int(size/step), int(size/step)+1):
             pos = i * step
-            glVertex3f(pos, 0, -size)
-            glVertex3f(pos, 0, size)
-            glVertex3f(-size, 0, pos)
-            glVertex3f(size, 0, pos)
+            # 垂直Z轴的网格（XY平面）
+            glVertex3f(pos, -size, 0)
+            glVertex3f(pos, size, 0)
+            glVertex3f(-size, pos, 0)
+            glVertex3f(size, pos, 0)
         glEnd()
         glEnable(GL_LIGHTING)
     
