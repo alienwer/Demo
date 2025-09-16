@@ -3,6 +3,7 @@ import numpy as np
 import os
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
+from PyQt5.QtCore import pyqtSignal, QObject
 
 try:
     import trimesh
@@ -77,6 +78,71 @@ class Joint:
     origin: List[float]  # [x, y, z, roll, pitch, yaw]
     axis: List[float]    # [x, y, z]
     limits: Tuple[float, float]  # (lower, upper)
+    
+    def get_transform(self, joint_value: float = 0.0) -> np.ndarray:
+        """根据关节值计算变换矩阵
+        
+        Args:
+            joint_value: 关节角度(弧度)或位移(米)
+            
+        Returns:
+            4x4变换矩阵
+        """
+        # 创建单位矩阵
+        transform = np.eye(4)
+        
+        # 处理原点偏移
+        if len(self.origin) >= 3:
+            x, y, z = self.origin[0], self.origin[1], self.origin[2]
+            transform[0, 3] = x
+            transform[1, 3] = y
+            transform[2, 3] = z
+            
+            # 处理原点旋转 (roll, pitch, yaw)
+            if len(self.origin) >= 6:
+                roll, pitch, yaw = self.origin[3], self.origin[4], self.origin[5]
+                # 创建旋转矩阵 (ZYX顺序)
+                cr, sr = np.cos(roll), np.sin(roll)
+                cp, sp = np.cos(pitch), np.sin(pitch)
+                cy, sy = np.cos(yaw), np.sin(yaw)
+                
+                rotation = np.array([
+                    [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+                    [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+                    [-sp, cp*sr, cp*cr]
+                ])
+                transform[:3, :3] = rotation
+        
+        # 根据关节类型添加关节变换
+        if self.joint_type == "revolute":
+            # 旋转关节
+            if len(self.axis) == 3:
+                axis = np.array(self.axis)
+                axis_norm = axis / np.linalg.norm(axis)
+                
+                # 创建旋转矩阵
+                c, s = np.cos(joint_value), np.sin(joint_value)
+                x, y, z = axis_norm
+                
+                rotation_joint = np.array([
+                    [c + x*x*(1-c), x*y*(1-c) - z*s, x*z*(1-c) + y*s],
+                    [y*x*(1-c) + z*s, c + y*y*(1-c), y*z*(1-c) - x*s],
+                    [z*x*(1-c) - y*s, z*y*(1-c) + x*s, c + z*z*(1-c)]
+                ])
+                
+                # 组合变换
+                transform[:3, :3] = transform[:3, :3] @ rotation_joint
+                
+        elif self.joint_type == "prismatic":
+            # 平移关节
+            if len(self.axis) == 3:
+                axis = np.array(self.axis)
+                axis_norm = axis / np.linalg.norm(axis)
+                
+                # 添加平移
+                transform[:3, 3] += axis_norm * joint_value
+        
+        return transform
 
 @dataclass
 class Link:
@@ -154,9 +220,16 @@ class Link:
                 # 继续递归更新子节点
                 self._update_link_transform_recursive(child_link)
 
-class RobotModel:
-    def __init__(self):
-        """初始化机器人模型的数据结构"""
+class RobotModel(QObject):
+    model_updated = pyqtSignal()  # 模型更新信号
+    
+    def __init__(self, debug_mode: bool = False):
+        """初始化机器人模型的数据结构
+        
+        Args:
+            debug_mode: 是否启用调试模式，控制调试信息输出
+        """
+        super().__init__()
         self.joints = {}  # 使用字典存储关节信息
         self.links = {}   # 使用字典存储连杆信息
         self.base_link = ""  # 基础连杆名称
@@ -166,6 +239,8 @@ class RobotModel:
         self.link_colors = {}  # 添加link_colors属性初始化
         self.parent_child_relations = {}  # 新增父子关系映射
         self.robot_mdh_params = {}  # 新增机器人MDH参数存储
+        self._warned_missing_links = set()  # 记录已警告过的缺失连杆
+        self.debug_mode = debug_mode  # 控制debug信息输出
         
     def load_meshes(self):
         """独立网格加载方法，增加详细异常捕获和日志"""
@@ -242,11 +317,13 @@ class RobotModel:
             self.links.clear()
             
             # 添加调试信息
-            print(f"[DEBUG] Loading URDF file: {file_path}")
+            if self.debug_mode:
+                print(f"[DEBUG] Loading URDF file: {file_path}")
 
             # 解析机器人基本信息
             robot_name = root.get("name", "robot")
-            print(f"[DEBUG] Robot name: {robot_name}")
+            if self.debug_mode:
+                print(f"[DEBUG] Robot name: {robot_name}")
             self.base_link = root.get("base_link", "")
             if not self.base_link:
                 base_link_elem = root.find("link")
@@ -288,7 +365,8 @@ class RobotModel:
                                     elif not os.path.isabs(mesh_path):
                                         mesh_path = os.path.abspath(os.path.join(os.path.dirname(file_path), mesh_path))
                                     geom_data["filename"] = mesh_path
-                                    print(f"加载网格文件: {mesh_path}")
+                                    if self.debug_mode:
+                                        print(f"加载网格文件: {mesh_path}")
                                 break
 
                     # 处理材质信息
@@ -377,32 +455,77 @@ class RobotModel:
                             if hasattr(mesh, "geometry"):
                                 for geometry_name, geometry in mesh.geometry.items():
                                     self.mesh_cache[f"{mesh_path}_{geometry_name}"] = geometry
-                                    print(f"[DEBUG] 缓存Scene子网格: {mesh_path}_{geometry_name}")
+                                    if self.debug_mode:
+                                        print(f"[DEBUG] 缓存Scene子网格: {mesh_path}_{geometry_name}")
                             else:
                                 self.mesh_cache[mesh_path] = mesh
-                                print(f"[DEBUG] 缓存Mesh: {mesh_path}")
+                                if self.debug_mode:
+                                    print(f"[DEBUG] 缓存Mesh: {mesh_path}")
                         else:
                             print(f"[ERROR] 无法加载网格: {mesh_path}")
                     else:
                         print(f"[WARNING] Mesh文件不存在或路径无效: {mesh_path}")
                         
-            print(f"[DEBUG] Model loaded with {len(self.links)} links and {len(self.joints)} joints")
-            print(f"[DEBUG] Joint names: {self.joint_names}")
-            print(f"[DEBUG] Default joint angles: {self.default_joint_angles}")
+            if self.debug_mode:
+                print(f"[DEBUG] Model loaded with {len(self.links)} links and {len(self.joints)} joints")
+                print(f"[DEBUG] Joint names: {self.joint_names}")
+                print(f"[DEBUG] Default joint angles: {self.default_joint_angles}")
             
             if is_calibrated:
                 print("[INFO] 已加载标定后的URDF文件")
             else:
                 if "rizon10" in robot_name.lower():
                     self.set_rizon10_mdh_parameters()
-                    print("[DEBUG] Rizon10 MDH参数已设置")
+                    if self.debug_mode:
+                        print("[DEBUG] Rizon10 MDH参数已设置")
             
             return True
+             
         except Exception as e:
-            print(f"加载URDF文件失败: {str(e)}")
+            print(f"[ERROR] 加载URDF文件失败: {e}")
             import traceback
             traceback.print_exc()
             return False
+    
+    def get_links(self) -> Dict[str, Link]:
+        """获取所有连杆信息"""
+        return self.links
+    
+    def update_link_mdh(self, link_name: str, param_name: str, value: float) -> bool:
+        """更新指定连杆的MDH参数"""
+        if link_name not in self.links:
+            return False
+        if param_name not in ['a', 'alpha', 'd', 'theta']:
+            return False
+        
+        link = self.links[link_name]
+        link.mdh_params[param_name] = value
+        return True
+    
+    def update_joint_angles(self, joint_angles: Dict[str, float]):
+        """更新关节角度并触发模型更新"""
+        if not joint_angles:
+            return
+        
+        # 更新默认关节角度
+        for joint_name, angle in joint_angles.items():
+            if joint_name in self.default_joint_angles:
+                self.default_joint_angles[joint_name] = angle
+        
+        # 更新连杆的MDH参数
+        for joint_name, angle in joint_angles.items():
+            # 假设关节名称与连杆名称有对应关系（如joint1对应link1）
+            link_name = joint_name.replace("joint", "link")
+            if link_name in self.links:
+                self.update_link_mdh(link_name, 'theta', angle)
+            else:
+                if link_name not in self._warned_missing_links:
+                    print(f"[WARNING] 连杆 '{link_name}' 不存在，跳过MDH参数更新")
+                    self._warned_missing_links.add(link_name)
+        
+        # 更新连杆变换并触发信号
+        self.update_link_transforms()
+        self.model_updated.emit()
 
     def get_joint_state(self) -> Dict[str, float]:
         """获取当前关节状态"""
@@ -433,6 +556,10 @@ class RobotModel:
             link_name = f"link{i+1}" if i < 7 else "flange"
             if link_name in self.links:
                 self.links[link_name].set_mdh_params(*params)
+            else:
+                if link_name not in self._warned_missing_links:
+                    print(f"[WARNING] 连杆 '{link_name}' 不存在，跳过MDH参数设置")
+                    self._warned_missing_links.add(link_name)
 
     def get_link_parameters(self) -> List[Dict]:
         """获取所有连杆的参数信息"""
@@ -487,6 +614,13 @@ class RobotModel:
         """
         for joint in self.joints.values():
             if joint.parent == parent_link.name:
+                # 检查子连杆是否存在
+                if joint.child not in self.links:
+                    if joint.child not in self._warned_missing_links:
+                        print(f"[WARNING] 子连杆 '{joint.child}' 不存在，跳过处理")
+                        self._warned_missing_links.add(joint.child)
+                    continue
+                    
                 child_link = self.links[joint.child]
                 # 获取父连杆的变换
                 parent_transform = parent_link.get_transform()

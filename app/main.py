@@ -126,6 +126,7 @@ class RobotArmControlApp(QMainWindow):
         self.joint_values = []
         self.hardware = hardware  # 保存为实例变量
         self.robot = robot
+        self.robot_model = None  # 机器人模型实例
         self.joint_curves = []
         self.ee_curve = None
         
@@ -136,7 +137,7 @@ class RobotArmControlApp(QMainWindow):
 
         # 通信层
         self.serial_comm = SerialCommunication()
-        self.robot_control = RobotControl(robot=self.robot, hardware=self.hardware)
+        self.robot_control = RobotControl(robot=self.robot, robot_model=self.robot_model, hardware=self.hardware)
         # 新增：抓手控制器
         self.gripper_control = GripperControl(robot=self.robot)
         # 信号绑定
@@ -379,24 +380,7 @@ class RobotArmControlApp(QMainWindow):
         global_vars_scroll.setWidget(global_vars_page)
         self.left_tab.addTab(global_vars_scroll, '全局变量')
         
-        # 高级控制页
-        advanced_scroll = QScrollArea()
-        advanced_scroll.setWidgetResizable(True)
-        advanced_page = QWidget()
-        advanced_layout = QVBoxLayout(advanced_page)
-        advanced_layout.setSpacing(8)
-        
-        # 导入高级控制组件
-        from app.ui.advanced_control_widget import AdvancedControlWidget
-        self.advanced_control_widget = AdvancedControlWidget(robot_control=self.robot_control)
-        
-        # 连接信号
-        self.advanced_control_widget.status_updated.connect(self.update_status_message)
-        self.advanced_control_widget.error_occurred.connect(self.show_error_message)
-        
-        advanced_layout.addWidget(self.advanced_control_widget)
-        advanced_scroll.setWidget(advanced_page)
-        self.left_tab.addTab(advanced_scroll, '高级控制')
+        # 高级控制页已移除
         # Splitter布局 - 优化分屏功能
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.addWidget(self.left_tab)
@@ -1958,6 +1942,15 @@ class RobotArmControlApp(QMainWindow):
             # 只允许Qt的OpenGL窗口
             success = self.gl_renderer.set_robot_model(urdf_path)
             if success:
+                # 创建RobotModel实例
+                from app.model.robot_model import RobotModel
+                self.robot_model = RobotModel(debug_mode=False)
+                self.robot_model.load_urdf(urdf_path)
+                
+                # 更新RobotControl的robot_model引用
+                if hasattr(self, 'robot_control') and self.robot_control:
+                    self.robot_control.robot_model = self.robot_model
+                
                 # 设置初始关节角度
                 zero_angles = [0.0] * 7
                 self.gl_renderer.set_joint_angles(zero_angles)
@@ -2005,7 +1998,7 @@ class RobotArmControlApp(QMainWindow):
             self.robot = flexivrdk.Robot("Rizon10-062295")
         else:
             self.robot = None
-        self.robot_control = RobotControl(robot=self.robot, hardware=self.hardware)
+        self.robot_control = RobotControl(robot=self.robot, robot_model=self.robot_model, hardware=self.hardware)
         self.gripper_control = GripperControl(robot=self.robot)
         # 可选：断开串口连接，重置UI等
         if self.serial_comm.is_connected():

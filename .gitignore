@@ -14,4 +14,5 @@ tests/
 archive/
 .github/
 .trae/
+.codebuddy/
 __pycache__

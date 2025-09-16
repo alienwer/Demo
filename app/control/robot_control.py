@@ -107,6 +107,28 @@ class RobotControl(QObject, threading.Thread):
         
         # 初始化信号管理器
         self.signal_manager = SignalManager()
+        
+        # Model初始化失败计数和自动恢复机制
+        self.model_init_fail_count = 0
+        self.last_model_init_failure_time = None
+        self.model_init_failure_history = []
+        
+        # 同步状态监控
+        self.sync_monitor_thread = None
+        self.sync_monitor_running = False
+        self.last_sync_time = time.time()
+        self.sync_timeout_threshold = 5.0  # 5秒同步超时
+        
+        # 网络诊断和监控
+        self.last_network_diagnosis_time = None
+        self.network_latency_history = []
+        self.packet_loss_history = []
+        self.network_quality_threshold = {
+            'latency_warning': 50.0,  # 延迟警告阈值(ms)
+            'latency_critical': 100.0, # 延迟严重阈值(ms)
+            'packet_loss_warning': 5.0, # 丢包率警告阈值(%)
+            'packet_loss_critical': 10.0 # 丢包率严重阈值(%)
+        }
 
     def set_joint_angle(self, joint_id: int, angle: float) -> bool:
         if not (0 <= joint_id < 7):
@@ -162,39 +184,105 @@ class RobotControl(QObject, threading.Thread):
             trajectory.extend(segment)
         return trajectory
 
-    def check_network_connection(self, robot_ip="192.168.2.100", timeout=3):
+    def check_network_connection(self, robot_ip="192.168.2.100", timeout=3, packet_count=4):
         """
-        检查与机器人的网络连接状态
+        检查与机器人的网络连接状态，返回网络状态、延迟和丢包率
         """
         try:
-            # 尝试ping机器人IP
+            # 发送多个ping包来检测丢包率
             result = subprocess.run(
-                ["ping", "-c", "1", "-W", str(timeout * 1000), robot_ip],
+                ["ping", "-c", str(packet_count), "-W", str(timeout * 1000), robot_ip],
                 capture_output=True,
                 text=True,
-                timeout=timeout + 1
+                timeout=timeout * packet_count + 1
             )
             
             if result.returncode == 0:
-                # 提取延迟信息
+                # 解析ping结果
                 output_lines = result.stdout.split('\n')
+                latency_values = []
+                packet_loss = 0.0
+                
+                # 提取延迟信息和丢包率
                 for line in output_lines:
                     if "time=" in line:
-                        time_part = line.split("time=")[1].split()[0]
-                        latency = float(time_part)
-                        self.status_updated.emit(f"网络连接正常，延迟: {latency}ms")
-                        return True, latency
-                return True, None
+                        try:
+                            time_part = line.split("time=")[1].split()[0]
+                            latency = float(time_part)
+                            latency_values.append(latency)
+                        except (ValueError, IndexError):
+                            pass
+                    elif "packet loss" in line:
+                        try:
+                            loss_part = line.split("packet loss")[0].split()[-1]
+                            packet_loss = float(loss_part.replace('%', ''))
+                        except (ValueError, IndexError):
+                            pass
+                
+                # 计算平均延迟
+                avg_latency = sum(latency_values) / len(latency_values) if latency_values else None
+                
+                # 更新网络诊断历史记录
+                if avg_latency is not None:
+                    self.network_latency_history.append(avg_latency)
+                    self.packet_loss_history.append(packet_loss)
+                    # 保持历史记录长度不超过100条
+                    if len(self.network_latency_history) > 100:
+                        self.network_latency_history.pop(0)
+                    if len(self.packet_loss_history) > 100:
+                        self.packet_loss_history.pop(0)
+                    
+                    self.status_updated.emit(f"网络连接正常，延迟: {avg_latency:.1f}ms, 丢包率: {packet_loss}%")
+                else:
+                    self.status_updated.emit(f"网络连接正常，丢包率: {packet_loss}%")
+                
+                return True, avg_latency, packet_loss
             else:
-                self.status_updated.emit(f"无法ping通机器人IP: {robot_ip}")
-                return False, None
+                # 检查是否有部分成功（有响应但存在丢包）
+                output_lines = result.stdout.split('\n')
+                packet_loss = 100.0
+                latency_values = []
+                
+                for line in output_lines:
+                    if "time=" in line:
+                        try:
+                            time_part = line.split("time=")[1].split()[0]
+                            latency = float(time_part)
+                            latency_values.append(latency)
+                            packet_loss = 0.0  # 至少有一个响应，丢包率不是100%
+                        except (ValueError, IndexError):
+                            pass
+                    elif "packet loss" in line:
+                        try:
+                            loss_part = line.split("packet loss")[0].split()[-1]
+                            packet_loss = float(loss_part.replace('%', ''))
+                        except (ValueError, IndexError):
+                            pass
+                
+                avg_latency = sum(latency_values) / len(latency_values) if latency_values else None
+                
+                # 更新网络诊断历史记录（即使部分连接也记录）
+                if packet_loss < 100.0 and avg_latency is not None:
+                    self.network_latency_history.append(avg_latency)
+                    self.packet_loss_history.append(packet_loss)
+                    # 保持历史记录长度不超过100条
+                    if len(self.network_latency_history) > 100:
+                        self.network_latency_history.pop(0)
+                    if len(self.packet_loss_history) > 100:
+                        self.packet_loss_history.pop(0)
+                    
+                    self.status_updated.emit(f"网络部分连接，延迟: {avg_latency:.1f}ms, 丢包率: {packet_loss}%")
+                    return True, avg_latency, packet_loss
+                else:
+                    self.status_updated.emit(f"无法ping通机器人IP: {robot_ip}")
+                    return False, None, 100.0
                 
         except subprocess.TimeoutExpired:
             self.status_updated.emit(f"网络连接超时 (>{timeout}s)")
-            return False, None
+            return False, None, 100.0
         except Exception as e:
             self.status_updated.emit(f"网络检查失败: {str(e)}")
-            return False, None
+            return False, None, 100.0
     
     def check_tcp_connection(self, robot_ip="192.168.2.100", port=8080, timeout=3):
         """
@@ -220,8 +308,28 @@ class RobotControl(QObject, threading.Thread):
     def update_robot_model(self, joint_angles):
         if not self.robot_model:
             return
-        # 递归更新各连杆的MDH参数（略，按原modern实现）
-        pass
+
+        # 更新机器人模型的关节角度
+        try:
+            # 创建关节角度字典
+            joint_angles_dict = {}
+            for i, joint_name in enumerate(self.robot_model.joint_names):
+                if i < len(joint_angles):
+                    joint_angles_dict[joint_name] = joint_angles[i]
+            
+            # 调用RobotModel的更新方法
+            self.robot_model.update_joint_angles(joint_angles_dict)
+            
+        except Exception as e:
+            logging.warning(f"更新机器人模型失败: {e}")
+    
+    def _get_joint_index(self, joint_name: str) -> Optional[int]:
+        """根据关节名称获取关节索引"""
+        joint_mapping = {
+            'joint1': 0, 'joint2': 1, 'joint3': 2, 'joint4': 3,
+            'joint5': 4, 'joint6': 5, 'joint7': 6
+        }
+        return joint_mapping.get(joint_name.lower())
 
     def run(self):
         if self.hardware:
@@ -250,9 +358,32 @@ class RobotControl(QObject, threading.Thread):
                     try:
                         self.model = Model(self.robot)
                         self.status_updated.emit("Model实例已初始化")
+                        # 重置Model初始化失败计数
+                        self.model_init_fail_count = 0
                     except Exception as e:
-                        logging.warning(f"Model实例初始化失败: {e}")
-                        self.status_updated.emit(f"Model初始化失败: {str(e)}")
+                        self.model_init_fail_count = getattr(self, 'model_init_fail_count', 0) + 1
+                        error_msg = str(e)
+                        
+                        # Model初始化错误分类处理
+                        if "Failed to deliver the request" in error_msg:
+                            logging.warning(f"Model实例初始化失败(网络通信): {error_msg}")
+                            self.status_updated.emit(f"Model初始化失败: 网络通信异常")
+                            # 触发网络诊断
+                            self._trigger_network_diagnosis()
+                        elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
+                            logging.warning(f"Model实例初始化失败(超时): {error_msg}")
+                            self.status_updated.emit(f"Model初始化失败: 连接超时")
+                        elif "connection" in error_msg.lower():
+                            logging.warning(f"Model实例初始化失败(连接): {error_msg}")
+                            self.status_updated.emit(f"Model初始化失败: 连接异常")
+                        else:
+                            logging.warning(f"Model实例初始化失败(其他): {error_msg}")
+                            self.status_updated.emit(f"Model初始化失败: {error_msg[:100]}")
+                        
+                        # 如果连续失败3次，尝试自动恢复
+                        if self.model_init_fail_count >= 3:
+                            self._attempt_model_recovery()
+                        
                         # Model初始化失败不影响其他功能，继续运行
                         
                 if self.tool is None and FLEXIV_AVAILABLE:
@@ -334,21 +465,38 @@ class RobotControl(QObject, threading.Thread):
                     except Exception as e:
                         logging.error(f"机器人使能尝试 {attempt + 1} 失败: {e}")
                         self.status_updated.emit(f"使能尝试 {attempt + 1} 失败: {str(e)}")
-                        if "Failed to deliver the request" in str(e):
-                             self.status_updated.emit("网络通信失败，开始网络诊断...")
+                        if "Failed to deliver the request" in str(e) or "network" in str(e).lower() or "connection" in str(e).lower():
+                             self.status_updated.emit("网络通信异常，开始网络诊断...")
                              # 进行网络连接诊断
-                             network_ok, latency = self.check_network_connection()
+                             network_ok, latency, packet_loss = self.check_network_connection()
                              if not network_ok:
-                                 self.status_updated.emit("网络连接异常，请检查网络设置")
+                                 self.status_updated.emit("网络连接异常，请检查网络设置和物理连接")
+                                 # 记录网络故障事件
+                                 self._log_network_issue("connection_failure", latency, packet_loss)
+                             elif latency and latency > 200:
+                                 self.status_updated.emit(f"网络延迟过高({latency}ms)，严重影响通信")
+                                 self._log_network_issue("high_latency", latency, packet_loss)
                              elif latency and latency > 100:
                                  self.status_updated.emit(f"网络延迟较高({latency}ms)，可能影响通信")
-                             time.sleep(3)  # 网络问题时等待更长时间
+                                 self._log_network_issue("medium_latency", latency, packet_loss)
+                             elif packet_loss and packet_loss > 5:
+                                 self.status_updated.emit(f"网络丢包率较高({packet_loss}%)，通信不稳定")
+                                 self._log_network_issue("packet_loss", latency, packet_loss)
+                             else:
+                                 self.status_updated.emit("网络诊断正常，可能是瞬时故障")
+                             
+                             # 根据网络状况调整重试等待时间
+                             wait_time = self._calculate_retry_wait_time(latency, packet_loss)
+                             time.sleep(wait_time)
                         else:
                             time.sleep(1)
                 
                 if not enable_success:
                     self.status_updated.emit("机器人使能失败，但继续运行监控模式")
                     # 不返回，继续运行以监控机器人状态
+                
+                # 同步状态监控和自动恢复机制
+                self._start_sync_monitor()
                 
                 self.running = True
                 while self.running:
@@ -360,6 +508,11 @@ class RobotControl(QObject, threading.Thread):
                                 self.status_updated.emit("机器人连接断开")
                                 # 发送断开连接信号
                                 self.signal_manager.emit(SignalType.ROBOT_DISCONNECTED, {"robot_id": self.robot_id})
+                                # 不直接退出，而是尝试重新连接
+                                self.status_updated.emit("尝试重新连接机器人...")
+                                # 设置标志以便重新进入连接初始化流程
+                                self.robot = None
+                                # 跳出内层循环，重新进入外层连接初始化流程
                                 break
                             
                             # 获取机器人状态数据
@@ -427,6 +580,9 @@ class RobotControl(QObject, threading.Thread):
                 self.status_updated.emit(f"错误: {str(e)}")
                 # 发送系统错误信号
                 self.signal_manager.emit(SignalType.SYSTEM_ERROR, {"error": str(e)})
+                # 连接断开时尝试重新连接
+                self.status_updated.emit("连接异常，尝试重新连接...")
+                time.sleep(2)  # 等待一段时间后重试
             finally:
                 self.stop_robot()
         else:
@@ -445,6 +601,9 @@ class RobotControl(QObject, threading.Thread):
     def stop_robot(self):
         """停止机器人控制线程"""
         self.running = False
+        # 停止同步状态监控
+        self._stop_sync_monitor()
+        
         if self.hardware and self.robot:
             try:
                 with self.robot_lock:
@@ -453,6 +612,226 @@ class RobotControl(QObject, threading.Thread):
             except Exception as e:
                 logging.error(f"停止机器人时出错: {e}")
         self.status_updated.emit("机器人控制已停止")
+    
+    def _trigger_network_diagnosis(self):
+        """触发网络诊断（使用历史记录进行智能分析）"""
+        try:
+            network_ok, latency, packet_loss = self.check_network_connection()
+            
+            if not network_ok:
+                self.status_updated.emit("⚠️ 网络诊断: 连接异常")
+                return
+            
+            # 使用历史记录进行趋势分析
+            if self.network_latency_history and self.packet_loss_history:
+                # 计算最近10次的平均值
+                recent_latency = sum(self.network_latency_history[-10:]) / len(self.network_latency_history[-10:])
+                recent_packet_loss = sum(self.packet_loss_history[-10:]) / len(self.packet_loss_history[-10:])
+                
+                # 趋势判断：当前值相比历史平均值的变化
+                latency_trend = "稳定"
+                if latency > recent_latency * 1.5:
+                    latency_trend = "恶化"
+                elif latency < recent_latency * 0.8:
+                    latency_trend = "改善"
+                
+                packet_loss_trend = "稳定"
+                if packet_loss > recent_packet_loss * 1.5:
+                    packet_loss_trend = "恶化"
+                elif packet_loss < recent_packet_loss * 0.8:
+                    packet_loss_trend = "改善"
+                
+                # 智能诊断逻辑
+                if latency > 200 or packet_loss > 10:
+                    self.status_updated.emit(f"🔴 网络诊断: 严重问题(延迟{latency:.1f}ms{latency_trend}, 丢包{packet_loss:.1f}%{packet_loss_trend})")
+                elif latency > 150 or packet_loss > 5:
+                    self.status_updated.emit(f"🟡 网络诊断: 中等问题(延迟{latency:.1f}ms{latency_trend}, 丢包{packet_loss:.1f}%{packet_loss_trend})")
+                elif latency > 100 or packet_loss > 3:
+                    self.status_updated.emit(f"🟠 网络诊断: 轻微问题(延迟{latency:.1f}ms{latency_trend}, 丢包{packet_loss:.1f}%{packet_loss_trend})")
+                else:
+                    self.status_updated.emit(f"✅ 网络诊断: 正常(延迟{latency:.1f}ms{latency_trend}, 丢包{packet_loss:.1f}%{packet_loss_trend})")
+            else:
+                # 没有足够历史数据时使用简单判断
+                if latency > 150:
+                    self.status_updated.emit(f"⚠️ 网络诊断: 高延迟({latency:.1f}ms)")
+                elif packet_loss > 3:
+                    self.status_updated.emit(f"⚠️ 网络诊断: 丢包率({packet_loss:.1f}%)")
+                else:
+                    self.status_updated.emit("✅ 网络诊断: 正常")
+                    
+        except Exception as e:
+            logging.error(f"网络诊断失败: {e}")
+    
+    def _attempt_model_recovery(self):
+        """尝试Model实例自动恢复"""
+        self.status_updated.emit("尝试自动恢复Model实例...")
+        try:
+            # 先检查网络连接
+            network_ok, latency, packet_loss = self.check_network_connection()
+            if not network_ok:
+                self.status_updated.emit("网络异常，无法自动恢复")
+                return
+            
+            # 尝试重新初始化Model
+            with self.robot_lock:
+                if self.model:
+                    del self.model
+                    self.model = None
+                
+                self.model = Model(self.robot)
+                self.model_init_fail_count = 0
+                self.status_updated.emit("✅ Model实例自动恢复成功")
+                
+        except Exception as e:
+            logging.warning(f"Model自动恢复失败: {e}")
+            self.status_updated.emit(f"Model自动恢复失败: {str(e)[:50]}")
+    
+    def _start_sync_monitor(self):
+        """启动同步状态监控"""
+        # 初始化同步状态监控变量
+        self.last_sync_time = time.time()
+        self.sync_timeout_count = 0
+        self.sync_monitor_active = True
+        
+        # 启动监控线程
+        self.sync_monitor_thread = threading.Thread(target=self._sync_monitor_loop, daemon=True)
+        self.sync_monitor_thread.start()
+    
+    def _stop_sync_monitor(self):
+        """停止同步状态监控"""
+        self.sync_monitor_active = False
+    
+    def _sync_monitor_loop(self):
+        """同步状态监控循环"""
+        while self.sync_monitor_active and self.running:
+            try:
+                current_time = time.time()
+                # 检查同步超时（5秒无更新视为超时）
+                if current_time - self.last_sync_time > 5.0:
+                    self.sync_timeout_count += 1
+                    
+                    if self.sync_timeout_count >= 3:
+                        self.status_updated.emit("⚠️ 同步状态: 连续超时，尝试恢复...")
+                        # 触发恢复机制
+                        self._attempt_sync_recovery()
+                        self.sync_timeout_count = 0
+                    else:
+                        self.status_updated.emit(f"⚠️ 同步状态: 超时({self.sync_timeout_count}/3)")
+                
+                # 正常同步时重置计数器
+                else:
+                    self.sync_timeout_count = 0
+                
+                time.sleep(1.0)  # 每秒检查一次
+                
+            except Exception as e:
+                logging.error(f"同步监控错误: {e}")
+                time.sleep(2.0)
+    
+    def _attempt_sync_recovery(self):
+        """尝试同步恢复（基于网络状况智能调整恢复策略）"""
+        try:
+            self.status_updated.emit("正在尝试同步恢复...")
+            
+            # 1. 检查网络状态
+            network_ok, latency, packet_loss = self.check_network_connection()
+            if not network_ok:
+                self.status_updated.emit("网络异常，同步恢复失败")
+                return False
+            
+            # 2. 基于网络状况制定恢复策略
+            recovery_strategy = self._determine_recovery_strategy(latency, packet_loss)
+            
+            # 3. 执行恢复策略
+            if recovery_strategy == "immediate":
+                # 立即恢复：网络状况良好
+                if self.model_init_fail_count > 0:
+                    self._attempt_model_recovery()
+                self.last_sync_time = time.time()
+                self.status_updated.emit("✅ 同步恢复成功（快速恢复）")
+                return True
+                
+            elif recovery_strategy == "delayed":
+                # 延迟恢复：网络状况一般，等待网络稳定
+                wait_time = self._calculate_retry_wait_time(latency, packet_loss)
+                self.status_updated.emit(f"网络状况一般，等待{wait_time:.1f}秒后重试...")
+                time.sleep(wait_time)
+                
+                # 再次检查网络
+                network_ok_retry, latency_retry, packet_loss_retry = self.check_network_connection()
+                if network_ok_retry and latency_retry < 100 and packet_loss_retry < 3:
+                    if self.model_init_fail_count > 0:
+                        self._attempt_model_recovery()
+                    self.last_sync_time = time.time()
+                    self.status_updated.emit("✅ 同步恢复成功（延迟恢复）")
+                    return True
+                else:
+                    self.status_updated.emit("网络状况未改善，恢复失败")
+                    return False
+                    
+            elif recovery_strategy == "cautious":
+                # 谨慎恢复：网络状况较差，需要多次验证
+                self.status_updated.emit("网络状况较差，进行谨慎恢复...")
+                
+                # 多次网络检查确认
+                successful_checks = 0
+                for i in range(3):
+                    network_ok_check, latency_check, packet_loss_check = self.check_network_connection()
+                    if network_ok_check and latency_check < 150 and packet_loss_check < 5:
+                        successful_checks += 1
+                    time.sleep(1.0)
+                
+                if successful_checks >= 2:
+                    if self.model_init_fail_count > 0:
+                        self._attempt_model_recovery()
+                    self.last_sync_time = time.time()
+                    self.status_updated.emit("✅ 同步恢复成功（谨慎恢复）")
+                    return True
+                else:
+                    self.status_updated.emit("网络状况不稳定，恢复失败")
+                    return False
+            
+        except Exception as e:
+            logging.error(f"同步恢复失败: {e}")
+            self.status_updated.emit(f"同步恢复失败: {str(e)[:50]}")
+            return False
+    
+    def _log_network_issue(self, issue_type, latency, packet_loss):
+        """记录网络问题"""
+        logging.warning(f"网络问题[{issue_type}]: 延迟={latency}ms, 丢包={packet_loss}%")
+    
+    def _determine_recovery_strategy(self, latency, packet_loss):
+        """根据网络状况确定恢复策略"""
+        if latency < 50 and packet_loss < 1:
+            return "immediate"  # 立即恢复：网络状况优秀
+        elif latency < 100 and packet_loss < 3:
+            return "delayed"    # 延迟恢复：网络状况一般
+        else:
+            return "cautious"   # 谨慎恢复：网络状况较差
+    
+    def _calculate_retry_wait_time(self, latency, packet_loss):
+        """根据网络状况计算重试等待时间"""
+        base_wait = 3.0
+        
+        # 基于网络历史记录动态调整等待时间
+        if self.network_latency_history and self.packet_loss_history:
+            # 计算最近5次的平均值
+            recent_latency = sum(self.network_latency_history[-5:]) / len(self.network_latency_history[-5:])
+            recent_packet_loss = sum(self.packet_loss_history[-5:]) / len(self.packet_loss_history[-5:])
+            
+            # 如果当前状况比历史平均值差很多，增加等待时间
+            if latency > recent_latency * 2 or packet_loss > recent_packet_loss * 2:
+                return base_wait * 3
+            elif latency > recent_latency * 1.5 or packet_loss > recent_packet_loss * 1.5:
+                return base_wait * 2
+        
+        # 基础判断逻辑
+        if latency > 200 or packet_loss > 10:
+            return base_wait * 2  # 严重问题时等待更久
+        elif latency > 100 or packet_loss > 5:
+            return base_wait * 1.5
+        else:
+            return base_wait
 
     def on_connect_robot_sn(self):
         """连接机器人（序列号方式）"""
@@ -569,11 +948,13 @@ class RobotControl(QObject, threading.Thread):
                     if "Failed to deliver the request" in error_msg:
                          self.status_updated.emit(f"网络通信失败 (尝试 {attempt + 1}): 开始网络诊断...")
                          # 进行网络连接诊断
-                         network_ok, latency = self.check_network_connection()
+                         network_ok, latency, packet_loss = self.check_network_connection()
                          if not network_ok:
                              self.status_updated.emit("网络连接异常，请检查网络设置")
                          elif latency and latency > 100:
                              self.status_updated.emit(f"网络延迟较高({latency}ms)，可能影响通信")
+                         elif packet_loss and packet_loss > 5:
+                             self.status_updated.emit(f"网络丢包率较高({packet_loss}%)，通信不稳定")
                          time.sleep(3)  # 网络问题等待更长时间
                     elif "mutex lock failed" in error_msg:
                         self.status_updated.emit(f"系统锁定错误 (尝试 {attempt + 1}): 等待系统恢复")
@@ -696,6 +1077,44 @@ class RobotControl(QObject, threading.Thread):
                 self.status_updated.emit(error_msg)
                 self.error_signal.emit(error_msg)
                 logging.error(f"获取Plan列表异常: {e}")
+                
+                # 检查是否为连接断开错误，尝试重连
+                if "No reply from the robot" in str(e) or "Disconnected" in str(e):
+                    self.status_updated.emit("检测到连接断开，尝试重新连接机器人...")
+                    try:
+                        # 重新初始化机器人连接
+                        with self.robot_lock:
+                            if self.robot is not None:
+                                from flexivrdk import Robot
+                                self.robot = Robot(self.robot_id)
+                                self.status_updated.emit(f"机器人重新连接成功: {self.robot_id}")
+                                
+                                # 重新初始化Model和Tool实例
+                                if self.model is None and FLEXIV_AVAILABLE:
+                                    try:
+                                        self.model = Model(self.robot)
+                                        self.status_updated.emit("Model实例重新初始化成功")
+                                    except Exception as model_error:
+                                        logging.warning(f"Model实例重新初始化失败: {model_error}")
+                                        
+                                if self.tool is None and FLEXIV_AVAILABLE:
+                                    try:
+                                        self.tool = Tool(self.robot)
+                                        self.status_updated.emit("Tool实例重新初始化成功")
+                                    except Exception as tool_error:
+                                        logging.warning(f"Tool实例重新初始化失败: {tool_error}")
+                        
+                        # 重连成功后等待一段时间让连接稳定
+                        time.sleep(2.0)
+                        
+                        # 重新尝试获取Plan列表
+                        self.status_updated.emit("重新尝试获取Plan列表...")
+                        return self.get_plan_list()
+                        
+                    except Exception as reconnect_error:
+                        self.status_updated.emit(f"机器人重连失败: {str(reconnect_error)}")
+                        logging.error(f"机器人重连异常: {reconnect_error}")
+                
                 return []
         
         elif not self.hardware:
@@ -755,7 +1174,47 @@ class RobotControl(QObject, threading.Thread):
                 
                 return info
             except Exception as e:
-                self.error_signal.emit(f"获取Plan信息失败: {str(e)}")
+                error_msg = str(e)
+                self.error_signal.emit(f"获取Plan信息失败: {error_msg}")
+                logging.error(f"获取Plan信息异常: {error_msg}")
+                
+                # 检查是否为连接断开错误，如果是则尝试重连
+                if "No reply from the robot" in error_msg or "Disconnected" in error_msg:
+                    self.status_updated.emit("检测到机器人连接断开，尝试重新连接...")
+                    logging.warning(f"检测到机器人连接断开，尝试重新连接: {error_msg}")
+                    
+                    try:
+                        # 重新初始化机器人连接
+                        self.robot = Robot(self.robot_id)
+                        self.status_updated.emit("机器人连接重新初始化成功")
+                        
+                        # 重新初始化Model实例
+                        if hasattr(self, 'model'):
+                            try:
+                                self.model = Model(self.robot)
+                                self.status_updated.emit("Model实例重新初始化成功")
+                            except Exception as model_error:
+                                logging.warning(f"Model实例重新初始化失败: {model_error}")
+                        
+                        # 重新初始化Tool实例
+                        if hasattr(self, 'tool'):
+                            try:
+                                self.tool = Tool(self.robot)
+                                self.status_updated.emit("Tool实例重新初始化成功")
+                            except Exception as tool_error:
+                                logging.warning(f"Tool实例重新初始化失败: {tool_error}")
+                        
+                        # 重连成功后等待一段时间让连接稳定
+                        time.sleep(2.0)
+                        
+                        # 重新尝试获取Plan信息
+                        self.status_updated.emit("重新尝试获取Plan信息...")
+                        return self.get_plan_info()
+                        
+                    except Exception as reconnect_error:
+                        self.status_updated.emit(f"机器人重连失败: {str(reconnect_error)}")
+                        logging.error(f"机器人重连异常: {reconnect_error}")
+                
                 return None
         return None
 
@@ -856,7 +1315,46 @@ class RobotControl(QObject, threading.Thread):
                 monitor_thread.start()
                 
             except Exception as e:
-                self.error_signal.emit(f"Plan执行失败: {str(e)}")
+                error_msg = str(e)
+                self.error_signal.emit(f"Plan执行失败: {error_msg}")
+                logging.error(f"Plan执行异常: {error_msg}")
+                
+                # 检查是否为连接断开错误，如果是则尝试重连
+                if "No reply from the robot" in error_msg or "Disconnected" in error_msg:
+                    self.status_updated.emit("检测到机器人连接断开，尝试重新连接...")
+                    logging.warning(f"检测到机器人连接断开，尝试重新连接: {error_msg}")
+                    
+                    try:
+                        # 重新初始化机器人连接
+                        self.robot = Robot(self.robot_id)
+                        self.status_updated.emit("机器人连接重新初始化成功")
+                        
+                        # 重新初始化Model实例
+                        if hasattr(self, 'model'):
+                            try:
+                                self.model = Model(self.robot)
+                                self.status_updated.emit("Model实例重新初始化成功")
+                            except Exception as model_error:
+                                logging.warning(f"Model实例重新初始化失败: {model_error}")
+                        
+                        # 重新初始化Tool实例
+                        if hasattr(self, 'tool'):
+                            try:
+                                self.tool = Tool(self.robot)
+                                self.status_updated.emit("Tool实例重新初始化成功")
+                            except Exception as tool_error:
+                                logging.warning(f"Tool实例重新初始化失败: {tool_error}")
+                        
+                        # 重连成功后等待一段时间让连接稳定
+                        time.sleep(2.0)
+                        
+                        # 重新尝试执行Plan
+                        self.status_updated.emit("重新尝试执行Plan...")
+                        self.execute_plan(plan, allow_disconnect)
+                        
+                    except Exception as reconnect_error:
+                        self.status_updated.emit(f"机器人重连失败: {str(reconnect_error)}")
+                        logging.error(f"机器人重连异常: {reconnect_error}")
     
     def stop_plan(self):
         """停止当前执行的plan"""
